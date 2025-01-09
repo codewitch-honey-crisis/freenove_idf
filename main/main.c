@@ -137,7 +137,7 @@ void camera_initialize(int flags) {
     camera_fb = (uint8_t*)heap_caps_malloc(
         (CAM_FRAME_SIZE_96X96)?2*96*96:
         2 * 240 * 240, 0 != (flags & CAM_ALLOC_FB_PSRAM) ? MALLOC_CAP_SPIRAM
-                                                         : MALLOC_CAP_DMA);
+                                                         : MALLOC_CAP_DEFAULT);
     if (camera_fb == NULL) {
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
@@ -178,7 +178,7 @@ void camera_initialize(int flags) {
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
     xTaskCreatePinnedToCore(camera_task, "camera_task", 8 * 1024, NULL, 10,
-                &camera_task_handle,1-xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
+                &camera_task_handle,xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
 }
 void camera_levels(int brightness, int contrast,
                    int saturation, int sharpness) {
@@ -213,12 +213,46 @@ void camera_deinitialize() {
     }
     esp_camera_deinit();
 }
-
+static const size_t lcd_transfer_buffer_size = 240*48*2;
+static void* lcd_transfer_buffer1=NULL;
+static void* lcd_transfer_buffer2=NULL;
+static volatile int lcd_dma_sel = 0;
 static volatile int lcd_flushing = 0;
 static spi_device_handle_t lcd_spi_handle = NULL;
+static void* lcd_transfer_buffer() {
+    return lcd_dma_sel?lcd_transfer_buffer1:lcd_transfer_buffer2;    
+}
+
+static bool lcd_wait_dma(uint32_t timeout) { 
+    uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
+    uint32_t total_ms = 0;
+    while ((timeout==0 || total_ms<=timeout ) && lcd_flushing > 1) {
+        //taskYIELD();
+        vTaskDelay(1);
+        uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+        total_ms += (new_ms - ms);
+        ms=new_ms;
+    }
+    return timeout==0 || total_ms<timeout;
+}
+ static bool lcd_begin_draw(uint32_t timeout) {
+    if(lcd_wait_dma(timeout)) {
+        int f = lcd_flushing;
+        lcd_flushing = f + 1;
+        return true;
+    } 
+    lcd_flushing=0;
+    return false;
+}
+static void lcd_switch_buffers() {
+    if(lcd_dma_sel==0) {
+        lcd_dma_sel = 1;
+    } else {
+        lcd_dma_sel = 0;
+    }
+}
 static IRAM_ATTR void lcd_on_flush_complete() {
-    lcd_flushing = 0;
-    gpio_set_level(LED,1);
+    
 }
 static void lcd_command(uint8_t cmd, const uint8_t* args,
                         size_t len) {
@@ -244,11 +278,14 @@ IRAM_ATTR void lcd_spi_pre_cb(spi_transaction_t* trans) {
     }
 }
 IRAM_ATTR void lcd_spi_post_cb(spi_transaction_t* trans) {
+    
+    lcd_flushing = 0;
     if (((int)trans->user) == 0) {
         DC_D;
     } else {
-
         if (((int)trans->user) == 2) {
+            
+            gpio_set_level(LED,1);    
             lcd_on_flush_complete();
         }
     }
@@ -334,6 +371,12 @@ static void lcd_write_bitmap(const void* data_in, uint32_t len) {
 static const bool big_cam = false;
 void app_main(void)
 {
+    lcd_transfer_buffer1 = heap_caps_malloc(lcd_transfer_buffer_size,MALLOC_CAP_DMA);
+    lcd_transfer_buffer2 = heap_caps_malloc(lcd_transfer_buffer_size,MALLOC_CAP_DMA);
+    if(lcd_transfer_buffer1==NULL || lcd_transfer_buffer2==NULL) {
+        puts("Could not allocate transfer buffers");
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
     gpio_config_t gpio_conf;
     gpio_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_conf.mode = GPIO_MODE_OUTPUT;
@@ -383,60 +426,65 @@ void app_main(void)
     lcd_st7789_init();
     
     camera_initialize(big_cam?0:CAM_FRAME_SIZE_96X96);
+    uint32_t total_ms = 0;
+    int frames = 0;
+    uint32_t ts_ms = pdTICKS_TO_MS(xTaskGetTickCount());
     while(true) {
+        uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
+        ++frames;
+        uint32_t end_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+        total_ms+=(end_ms-start_ms);
+        if(end_ms>ts_ms+1000) {
+            ts_ms = end_ms;
+            if(frames>0) {
+                printf("FPS: %d, avg ms: %0.2f\n",frames,(float)total_ms/(float)frames);
+            }
+            total_ms=0;
+            frames = 0;
+        }
         vTaskDelay(1);
     }
 }
 void camera_on_frame() {
-    const void* bmp=camera_lock_frame_buffer(false);
-    if(bmp==NULL) return;
     if(big_cam) {
         static const size_t size = 240*48;
         for(int y=0;y<240;y+=48) {
-            
-            lcd_flushing = 1;
-            lcd_set_window(0,y,239,y+47);
-            lcd_write_bitmap(((const uint16_t*)bmp)+(y*240),size);
-            uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
-            uint32_t total_ms = 0;
-            while(total_ms<400 && lcd_flushing) {
-                taskYIELD();
-                uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
-                total_ms+=(new_ms-ms);
-                if(new_ms>=ms+200) {
-                    ms = new_ms;
+            void* data = lcd_transfer_buffer();
+            const void* bmp=camera_lock_frame_buffer(false);
+            if(bmp!=NULL) {
+                memcpy(data,((const uint16_t*)bmp)+(y*240),size*2);        
+                camera_unlock_frame_buffer();
+        
+                lcd_set_window(0,y,239,y+47);
+                if(lcd_begin_draw(400)) {
+                    gpio_set_level(LED,0);
+                    lcd_write_bitmap(data,size);
+                    lcd_switch_buffers();
+                } else {
+                    puts("LCD flush timeout");
                     vTaskDelay(1);
                 }
             }
-            if(total_ms>=400) {
-                puts("LCD flush timeout");
-                vTaskDelay(5);
-            }
         }
-        camera_unlock_frame_buffer();
+        
     } else {
-        static const size_t size = 96*96;        
-        lcd_flushing = 1;
-        gpio_set_level(LED,0);
-        lcd_set_window(0,0,95,95);
-        lcd_write_bitmap(bmp,size);
-        uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
-        uint32_t total_ms = 0;
-        while(total_ms<400 && lcd_flushing) {
-            taskYIELD();
-            uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
-            total_ms+=(new_ms-ms);
-            if(new_ms>=ms+200) {
-                ms=new_ms;
+        const void* bmp=camera_lock_frame_buffer(false);
+        if(bmp!=NULL) {
+            static const size_t size = 96*96;
+            void* data = lcd_transfer_buffer();
+            memcpy(data,((const uint16_t*)bmp),size*2);
+            camera_unlock_frame_buffer();
+            lcd_set_window(0,0,95,95);
+            if(lcd_begin_draw(400)) {
+                gpio_set_level(LED,0);
+                lcd_write_bitmap(data,size);
+                lcd_switch_buffers();
+            } else {
+                puts("LCD flush timeout");
                 vTaskDelay(1);
             }
-        }   
-        if(total_ms>=400) {
-            puts("LCD flush timeout");
-            vTaskDelay(5);
         }
-        camera_unlock_frame_buffer();
     }
     
 
