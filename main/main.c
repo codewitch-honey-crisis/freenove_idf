@@ -97,7 +97,6 @@ void camera_task(void* pvParameters) {
         fb_buf = esp_camera_fb_get();
         if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
             if (pdTRUE == xSemaphoreTake(camera_fb_lock, 50  )) {
-                //puts("FRAME");
                 if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
                     memcpy(camera_fb, fb_buf->buf,fb_buf->width*fb_buf->height*2);
                     //camera_copy_rotate(fb_buf->buf, fb_buf->width, fb_buf->height);
@@ -219,7 +218,7 @@ void camera_deinitialize() {
 static volatile int lcd_flushing = 0;
 static spi_device_handle_t lcd_spi_handle = NULL;
 static IRAM_ATTR void lcd_on_flush_complete() {
-    gpio_set_level(LED,0);
+    //gpio_set_level(LED,0);
     lcd_flushing = 0;
 }
 static void lcd_command(uint8_t cmd, const uint8_t* args,
@@ -431,9 +430,14 @@ void camera_on_frame() {
                 vTaskDelay(5);
             }
         }   
-        if(total_ms>100) {
+        if(total_ms>=1000) {
             puts("FLUSH TIMEOUT");
         } 
+        //uint32_t yield_ms=0,ms = pdTICKS_TO_MS(xTaskGetTickCount());
+        // if(ms>=yield_ms+200) {
+        //     yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
+        //     vTaskDelay(5);
+        // }
         camera_unlock_frame_buffer();
     }
     
