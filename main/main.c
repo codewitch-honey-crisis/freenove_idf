@@ -174,11 +174,10 @@ void camera_initialize(int flags) {
     sensor_t* s = esp_camera_sensor_get();
     // initial sensors are flipped vertically and colors are a bit saturated
     s->set_vflip(s, 0);  // flip it back
-    // s->set_contrast(s,0);
     s->set_hmirror(s, 1);     // horizontal mirror image
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
-    xTaskCreate(camera_task, "camera_task", 8 * 1024, NULL, 1,
+    xTaskCreate(camera_task, "camera_task", 8 * 1024, NULL, 10,
                 &camera_task_handle);
 }
 void camera_levels(int brightness, int contrast,
@@ -384,13 +383,9 @@ void app_main(void)
     lcd_st7789_init();
     
     camera_initialize(big_cam?0:CAM_FRAME_SIZE_96X96);
-    uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
     while(true) {
         camera_on_frame();
-        if(pdTICKS_TO_MS(xTaskGetTickCount())>=ms+200) {
-            ms =pdTICKS_TO_MS(xTaskGetTickCount());
-            vTaskDelay(5);
-        }
+        vTaskDelay(1);
     }
 }
 void camera_on_frame() {
@@ -406,12 +401,12 @@ void camera_on_frame() {
             uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
             uint32_t total_ms = 0;
             while(total_ms<400 && lcd_flushing) {
-                portYIELD();
+                taskYIELD();
                 uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
                 total_ms+=(new_ms-ms);
                 if(new_ms>=ms+200) {
                     ms = new_ms;
-                    vTaskDelay(5);
+                    vTaskDelay(1);
                 }
             }
             if(total_ms>=400) {
@@ -429,12 +424,12 @@ void camera_on_frame() {
         uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
         uint32_t total_ms = 0;
         while(total_ms<400 && lcd_flushing) {
-            portYIELD();
+            taskYIELD();
             uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
             total_ms+=(new_ms-ms);
             if(new_ms>=ms+200) {
                 ms=new_ms;
-                vTaskDelay(5);
+                vTaskDelay(1);
             }
         }   
         if(total_ms>=400) {
