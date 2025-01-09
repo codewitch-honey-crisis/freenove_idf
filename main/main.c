@@ -218,8 +218,8 @@ void camera_deinitialize() {
 static volatile int lcd_flushing = 0;
 static spi_device_handle_t lcd_spi_handle = NULL;
 static IRAM_ATTR void lcd_on_flush_complete() {
-    //gpio_set_level(LED,0);
     lcd_flushing = 0;
+    gpio_set_level(LED,1);
 }
 static void lcd_command(uint8_t cmd, const uint8_t* args,
                         size_t len) {
@@ -250,7 +250,6 @@ IRAM_ATTR void lcd_spi_post_cb(spi_transaction_t* trans) {
     } else {
 
         if (((int)trans->user) == 2) {
-            
             lcd_on_flush_complete();
         }
     }
@@ -416,12 +415,12 @@ void camera_on_frame() {
     } else {
         static const size_t size = 96*96;        
         lcd_flushing = 1;
-        gpio_set_level(LED,1);
+        gpio_set_level(LED,0);
         lcd_set_window(0,0,95,95);
         lcd_write_bitmap(bmp,size);
         uint32_t yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
         uint32_t total_ms=0;
-        while(total_ms<1000 && lcd_flushing) {
+        while(total_ms<400 && lcd_flushing) {
             portYIELD();
             uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
             if(ms>=yield_ms+200) {
@@ -430,7 +429,7 @@ void camera_on_frame() {
                 vTaskDelay(5);
             }
         }   
-        if(total_ms>=1000) {
+        if(total_ms>=400) {
             puts("FLUSH TIMEOUT");
         } 
         //uint32_t yield_ms=0,ms = pdTICKS_TO_MS(xTaskGetTickCount());
