@@ -97,9 +97,9 @@ void camera_task(void* pvParameters) {
         fb_buf = esp_camera_fb_get();
         if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
             if (pdTRUE == xSemaphoreTake(camera_fb_lock, 50  )) {
+                // double lock protection
                 if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
-                    memcpy(camera_fb, fb_buf->buf,fb_buf->width*fb_buf->height*2);
-                    //camera_copy_rotate(fb_buf->buf, fb_buf->width, fb_buf->height);
+                    camera_copy_rotate(fb_buf->buf, fb_buf->width, fb_buf->height);
                 }
                 xSemaphoreGive(camera_fb_lock);
             } 
@@ -177,8 +177,8 @@ void camera_initialize(int flags) {
     s->set_hmirror(s, 1);     // horizontal mirror image
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
-    xTaskCreate(camera_task, "camera_task", 8 * 1024, NULL, 10,
-                &camera_task_handle);
+    xTaskCreatePinnedToCore(camera_task, "camera_task", 8 * 1024, NULL, 10,
+                &camera_task_handle,1-xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
 }
 void camera_levels(int brightness, int contrast,
                    int saturation, int sharpness) {
