@@ -1,0 +1,14 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.espIdfPathWin": "C:\\Users\\gazto\\esp\\v5.2.3\\esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ],
+    "idf.portWin": "COM23",
+    "idf.toolsPathWin": "C:\\Users\\gazto\\.espressif",
+    "idf.flashType": "UART",
+    "files.associations": {
+        "spi_master.h": "c",
+        "gpio_ll.h": "c"
+    }
+}
