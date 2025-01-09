@@ -394,7 +394,8 @@ void app_main(void)
     }
 }
 void camera_on_frame() {
-    const void* bmp=camera_lock_frame_buffer(true);
+    const void* bmp=camera_lock_frame_buffer(false);
+    if(bmp==NULL) return;
     if(big_cam) {
         static const size_t size = 240*48;
         for(int y=0;y<240;y+=48) {
@@ -403,12 +404,18 @@ void camera_on_frame() {
             lcd_set_window(0,y,239,y+47);
             lcd_write_bitmap(((const uint16_t*)bmp)+(y*240),size);
             uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
-            while(lcd_flushing) {
+            uint32_t total_ms = 0;
+            while(total_ms<400 && lcd_flushing) {
                 portYIELD();
-                if(pdTICKS_TO_MS(xTaskGetTickCount())>=ms+200) {
-                    ms =pdTICKS_TO_MS(xTaskGetTickCount());
+                uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+                total_ms+=(new_ms-ms);
+                if(new_ms>=ms+200) {
+                    ms = new_ms;
                     vTaskDelay(5);
                 }
+            }
+            if(total_ms>=400) {
+                puts("LCD flush timeout");
             }
         }
         camera_unlock_frame_buffer();
@@ -418,25 +425,21 @@ void camera_on_frame() {
         gpio_set_level(LED,0);
         lcd_set_window(0,0,95,95);
         lcd_write_bitmap(bmp,size);
-        uint32_t yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
-        uint32_t total_ms=0;
+        uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
+        uint32_t total_ms = 0;
         while(total_ms<400 && lcd_flushing) {
             portYIELD();
-            uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
-            if(ms>=yield_ms+200) {
-                total_ms+=(ms-yield_ms);
-                yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
+            uint32_t new_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+            total_ms+=(new_ms-ms);
+            if(new_ms>=ms+200) {
+                ms=new_ms;
                 vTaskDelay(5);
             }
         }   
         if(total_ms>=400) {
-            puts("FLUSH TIMEOUT");
-        } 
-        //uint32_t yield_ms=0,ms = pdTICKS_TO_MS(xTaskGetTickCount());
-        // if(ms>=yield_ms+200) {
-        //     yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
-        //     vTaskDelay(5);
-        // }
+            puts("LCD flush timeout");
+            vTaskDelay(5);
+        }
         camera_unlock_frame_buffer();
     }
     
