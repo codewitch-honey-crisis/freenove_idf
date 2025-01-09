@@ -416,6 +416,7 @@ void camera_on_frame() {
             }
             if(total_ms>=400) {
                 puts("LCD flush timeout");
+                vTaskDelay(5);
             }
         }
         camera_unlock_frame_buffer();
