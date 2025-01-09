@@ -28,6 +28,8 @@
 #define CAM_PWDN -1
 #define CAM_RST -1
 
+#define LED 2
+
 #define DC_C GPIO.out_w1tc = (1 << PIN_DC);
 #define DC_D GPIO.out_w1ts = (1 << PIN_DC);
 
@@ -214,10 +216,10 @@ void camera_deinitialize() {
     esp_camera_deinit();
 }
 
-
 static volatile int lcd_flushing = 0;
 static spi_device_handle_t lcd_spi_handle = NULL;
 static IRAM_ATTR void lcd_on_flush_complete() {
+    gpio_set_level(LED,0);
     lcd_flushing = 0;
 }
 static void lcd_command(uint8_t cmd, const uint8_t* args,
@@ -249,6 +251,7 @@ IRAM_ATTR void lcd_spi_post_cb(spi_transaction_t* trans) {
     } else {
 
         if (((int)trans->user) == 2) {
+            
             lcd_on_flush_complete();
         }
     }
@@ -339,10 +342,13 @@ void app_main(void)
     gpio_conf.mode = GPIO_MODE_OUTPUT;
     gpio_conf.pin_bit_mask = (((unsigned long long)1) << PIN_DC);
     gpio_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    gpio_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&gpio_conf);
     gpio_set_direction((gpio_num_t)PIN_CS, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)PIN_CS, 0);
+
+    gpio_set_direction((gpio_num_t)LED, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)LED, 0);
     // configure the SPI bus
     const spi_host_device_t host = SPI3_HOST;
     spi_bus_config_t buscfg;
@@ -411,18 +417,21 @@ void camera_on_frame() {
     } else {
         static const size_t size = 96*96;        
         lcd_flushing = 1;
+        gpio_set_level(LED,1);
         lcd_set_window(0,0,95,95);
         lcd_write_bitmap(bmp,size);
-        uint32_t ms =pdTICKS_TO_MS(xTaskGetTickCount());
-        int i = 0;
-        while(i++<10000 && lcd_flushing) {
+        uint32_t yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
+        uint32_t total_ms=0;
+        while(total_ms<1000 && lcd_flushing) {
             portYIELD();
-            if(pdTICKS_TO_MS(xTaskGetTickCount())>=ms+200) {
-                ms =pdTICKS_TO_MS(xTaskGetTickCount());
+            uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
+            if(ms>=yield_ms+200) {
+                total_ms+=(ms-yield_ms);
+                yield_ms =pdTICKS_TO_MS(xTaskGetTickCount());
                 vTaskDelay(5);
             }
         }   
-        if(i>=10000) {
+        if(total_ms>100) {
             puts("FLUSH TIMEOUT");
         } 
         camera_unlock_frame_buffer();
