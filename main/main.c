@@ -387,7 +387,7 @@ static void lcd_clear_screen(uint16_t color) {
         lcd_switch_buffers();
     }
 }
-static const bool big_cam =false;
+static const bool big_cam =true;
 void app_main(void)
 {
     memset(lcd_trans,0,sizeof(spi_transaction_t)*14);
@@ -445,7 +445,6 @@ void app_main(void)
     
     lcd_st7789_init();
 
-    uint16_t col;
     uint32_t total_ms = 0;
     int frames = 0;
     uint32_t ts_ms = pdTICKS_TO_MS(xTaskGetTickCount());
