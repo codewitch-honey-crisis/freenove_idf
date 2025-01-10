@@ -17,6 +17,10 @@ enum {
     CAM_HIGH,
     CAM_HIGHEST
 };
+enum {
+    TOUCH_THRESH_DEFAULT = 32
+};
+
 // optionally implemented by user: notify when transfer complete
 extern IRAM_ATTR void lcd_on_flush_complete() __attribute__((weak));
 extern void lcd_initialize(size_t max_transfer_size);
@@ -39,4 +43,10 @@ extern void camera_deinitialize();
 extern void neopixel_initialize();
 extern void neopixel_color(uint8_t r, uint8_t g, uint8_t b);
 extern void neopixel_deinitialize();
+
+extern void touch_initialize(int threshhold);
+extern void touch_rotation(int rotation);
+extern int touch_xy(uint16_t* out_x, uint16_t* out_y);
+extern int touch_xy2(uint16_t* out_x, uint16_t* out_y);
+extern void touch_deinitialize();
 #endif // FREENOVE_S3_DEVKIT_H

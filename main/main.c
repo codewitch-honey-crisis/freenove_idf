@@ -47,14 +47,13 @@ void app_main(void)
 {
     static const size_t max_size =big_cam? 240*32*2:96*96*2;
     lcd_initialize(max_size);
-    
     lcd_transfer_buffer1 = heap_caps_malloc(max_size,MALLOC_CAP_DMA);
     lcd_transfer_buffer2 = heap_caps_malloc(max_size,MALLOC_CAP_DMA);
     if(lcd_transfer_buffer1==NULL || lcd_transfer_buffer2==NULL) {
         puts("Could not allocate transfer buffers");
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
-    
+    touch_initialize(TOUCH_THRESH_DEFAULT);
     uint32_t total_ms = 0;
     int frames = 0;
     uint32_t ts_ms = pdTICKS_TO_MS(xTaskGetTickCount());
@@ -67,20 +66,29 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_config));
     camera_rotation(3);
     lcd_rotation(3);
-    //neopixel_initialize();
+    touch_rotation(3);
+    neopixel_initialize();
+    //led_initialize(); // conflicts with touch/i2c
     printf("Free SRAM: %0.2fKB, free PSRAM: %0.2fMB\n",heap_caps_get_free_size(MALLOC_CAP_INTERNAL)/1024.f,heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024.f/1024.f);
     
-    int toggle = 0;
+    int col = 0;
     while(true) {
         uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
+        uint16_t x,y;
+        if(touch_xy(&x,&y)) {
+            printf("touch: (%d, %d)\n",x,y);
+        }
         ++frames;
         uint32_t end_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         total_ms+=(end_ms-start_ms);
         if(end_ms>ts_ms+1000) {
             ts_ms = end_ms;
-            toggle = !toggle;
-            //neopixel_color(255*toggle,255*toggle,255*toggle);
+            if(++col == 4) {
+                col = 0;
+            }
+            neopixel_color(255*(col==1),255*(col==2),255*(col==3));
+            //led_enable(col&1);
             if(frames>0) {
                 printf("FPS: %d, avg ms: %0.2f\n",frames,(float)total_ms/(float)frames);
             }
@@ -107,7 +115,6 @@ void camera_on_frame() {
     } else {
         static const size_t size = 96*96;
         const uint8_t* bmp=(const uint8_t*)camera_frame_buffer();
-        
         uint8_t* data = lcd_transfer_buffer();
         memcpy(data,bmp,size*2);
         if(lcd_wait_flush(400)) {

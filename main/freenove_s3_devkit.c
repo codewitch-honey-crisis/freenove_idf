@@ -1,10 +1,13 @@
 #include "freenove_s3_devkit.h"
-
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <driver/gpio.h>
 #include <driver/i2s_std.h>
 #include <driver/spi_master.h>
 #include <esp_camera.h>
 #include <hal/gpio_ll.h>
+// TODO: Update the following when the camera component is updated
+#include <driver/i2c.h>
 #include <memory.h>
 #define LCD_DC 0
 #define LCD_CS 47
@@ -34,8 +37,14 @@
 
 #define NEOPIXEL 48
 
+#define I2C_SCL 1
+#define I2C_SDA 2
+
 #define DC_C GPIO.out_w1tc = (1 << LCD_DC);
 #define DC_D GPIO.out_w1ts = (1 << LCD_DC);
+
+#define LED_OFF GPIO.out_w1tc = (1 << LED);
+#define LED_ON GPIO.out_w1ts = (1 << LED);
 
 static spi_device_handle_t lcd_spi_handle = NULL;
 static spi_transaction_t lcd_trans[14];
@@ -271,19 +280,31 @@ void lcd_flush(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
     int w = x2 - x1 + 1, h = y2 - y1 + 1;
     lcd_write_bitmap(bitmap, w * h);
 }
-
+static int led_initialized = 0;
 void led_enable(int value) {
-    gpio_set_level((gpio_num_t)LED, value == 0 ? 0 : 1);
+    if(!led_initialized) {
+        return;
+    }
+    if(value==0) {
+        LED_OFF;
+    } else {
+        LED_ON;
+    }
 }
+static int i2c_initialized=0;
 void led_initialize() {
+    if(led_initialized || i2c_initialized) {
+        return;
+    }
     gpio_set_direction((gpio_num_t)LED, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)LED, 0);
+    LED_OFF;
+    led_initialized = true;
 }
-void led_deinitialize() { gpio_set_level((gpio_num_t)LED, 0); }
+void led_deinitialize() { LED_OFF; led_initialized=false; }
 
 static void* camera_fb = NULL;
 static int camera_rot = 0;
-static bool camera_initialized = false;
+static int camera_initialized = 0;
 static int camera_flags = 0;
 static camera_fb_t* camera_current_fb = NULL;
 void camera_rotation(int rotation) { camera_rot = rotation & 3; }
@@ -382,7 +403,7 @@ void camera_initialize(int flags) {
     s->set_hmirror(s, 1);     // horizontal mirror image
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
-    camera_initialized = true;
+    camera_initialized = 1;
     const size_t camera_size =
         (flags & CAM_FRAME_SIZE_96X96) ? 96 * 96 * 2 : 240 * 240 * 2;
     camera_fb = heap_caps_malloc(camera_size, (flags & CAM_ALLOC_FB_PSRAM)
@@ -413,7 +434,7 @@ void camera_deinitialize() {
         return;
     }
     camera_current_fb = NULL;
-    camera_initialized = false;
+    camera_initialized = 0;
     esp_camera_deinit();
     if (camera_fb != NULL) {
         free(camera_fb);
@@ -462,7 +483,7 @@ void neopixel_initialize() {
     chan_cfg.role = I2S_ROLE_MASTER;
     chan_cfg.dma_desc_num = 4;
     chan_cfg.dma_frame_num = sizeof(neopixel_out_buffer);
-    chan_cfg.auto_clear = false;
+    chan_cfg.auto_clear = 0;
     chan_cfg.intr_priority = 0;
 
     i2s_new_channel(&chan_cfg, &neopixel_handle, NULL);
@@ -483,11 +504,11 @@ void neopixel_initialize() {
     std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_STEREO;
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
     std_cfg.slot_cfg.ws_width = I2S_SLOT_BIT_WIDTH_16BIT;
-    std_cfg.slot_cfg.ws_pol = false;
-    std_cfg.slot_cfg.bit_shift = false;
-    std_cfg.slot_cfg.left_align = true;
-    std_cfg.slot_cfg.big_endian = false;
-    std_cfg.slot_cfg.bit_order_lsb = false;
+    std_cfg.slot_cfg.ws_pol = 0;
+    std_cfg.slot_cfg.bit_shift = 0;
+    std_cfg.slot_cfg.left_align = 1;
+    std_cfg.slot_cfg.big_endian = 0;
+    std_cfg.slot_cfg.bit_order_lsb = 0;
     i2s_channel_init_std_mode(neopixel_handle, &std_cfg);
 }
 
@@ -499,3 +520,221 @@ void neopixel_deinitialize() {
     i2s_del_channel(neopixel_handle);
     neopixel_handle = NULL;
 };
+
+static void i2c_initialize() {
+    if(led_initialized||i2c_initialized) {
+        return;
+    }
+    i2c_config_t config;
+    memset(&config,0,sizeof(config));
+    config.master.clk_speed = 100*1000;
+    config.mode = I2C_MODE_MASTER;
+    config.scl_io_num = I2C_SCL;
+    config.sda_io_num = I2C_SDA;
+    config.scl_pullup_en = 1;
+    config.sda_pullup_en = 1;
+    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0,&config));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0,I2C_MODE_MASTER,0,0,0));
+    i2c_initialized = 1;
+}
+// static void i2c_deinitialize() {
+//     if(!i2c_initialized) {
+//         return;
+//     }
+//     ESP_ERROR_CHECK(i2c_driver_delete(I2C_NUM_0));
+//     i2c_initialized = 0;
+// }
+
+static int touch_rot = 0;
+static int touch_initialized = 0;
+static uint32_t touch_timestamp = 0;
+static size_t touch_count = 0;
+static uint16_t touch_x_data[2], touch_y_data[2], touch_id_data[2];
+static int touch_write_reg(int r, int value) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if(ESP_OK!=i2c_master_start(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_write_byte(cmd, 0x38 << 1 | I2C_MASTER_WRITE, I2C_MASTER_ACK)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    uint8_t data[2];
+    data[0]=r;
+    data[1]=value;
+    if(ESP_OK!=i2c_master_write(cmd,data,sizeof(data),I2C_MASTER_ACK)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_stop(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0,cmd,portMAX_DELAY)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    i2c_cmd_link_delete(cmd);
+    return 1;
+}
+static int touch_read_all() {
+    static const uint8_t ACK_CHECK_EN = 0x1;
+    uint8_t i2cdat[16];
+        // Read data
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if(ESP_OK!=i2c_master_start(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_write_byte(cmd, (0x38<<1), ACK_CHECK_EN)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_write_byte(cmd, 0, ACK_CHECK_EN)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_stop(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS( 1000))) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    i2c_cmd_link_delete(cmd);
+    
+    cmd = i2c_cmd_link_create();
+    if(ESP_OK!=i2c_master_start(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_write_byte(cmd, (0x38<<1)|1, ACK_CHECK_EN)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_read(cmd, i2cdat, sizeof(i2cdat),  I2C_MASTER_LAST_NACK)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_stop(cmd)) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000))) {
+        i2c_cmd_link_delete(cmd);
+        return 0;
+    }
+    i2c_cmd_link_delete(cmd);
+
+    touch_count = i2cdat[0x02];
+    if (touch_count > 2) {
+        touch_count = 0;
+    }
+
+    for (uint8_t i = 0; i < 2; i++) {
+        touch_x_data[i] = i2cdat[0x03 + i * 6] & 0x0F;
+        touch_x_data[i] <<= 8;
+        touch_x_data[i] |= i2cdat[0x04 + i * 6];
+        touch_y_data[i] = i2cdat[0x05 + i * 6] & 0x0F;
+        touch_y_data[i] <<= 8;
+        touch_y_data[i] |= i2cdat[0x06 + i * 6];
+        touch_id_data[i] = i2cdat[0x05 + i * 6] >> 4;
+    }
+    return 1;
+}
+void touch_initialize(int threshhold) {
+    if(touch_initialized) {
+        return;
+    }
+    i2c_initialize();
+    if(0==touch_write_reg(0x80, threshhold)) {
+        ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
+    }
+    
+    touch_count = 0;
+    touch_initialized = 1;
+}
+void touch_deinitialize() {
+    if(!touch_initialized) {
+        return;
+    }
+    // nothing for now
+    touch_initialized = 0;
+}
+void touch_rotation(int rotation) {
+    touch_rot = rotation&3;
+}
+static int touch_update() {
+    if(!touch_initialized) {
+        return 0;
+    }
+    uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
+    if(ms>touch_timestamp+13) {
+        if(!touch_read_all()) {
+            return 0;
+        }
+        touch_timestamp = ms;
+    }
+    return 1;
+}
+static void touch_translate(uint16_t* x, uint16_t* y) {
+    uint16_t tmp;
+    switch (touch_rot) {
+        case 1:
+            tmp = *x;
+            *x = *y;
+            *y = 240 - tmp - 1;
+            break;
+        case 2:
+            *x = 240 - *x - 1;
+            *y = 320 - *y - 1;
+            break;
+        case 3:
+            tmp = *x;
+            *x = 320 - *y - 1;
+            *y = tmp;
+        default:
+            break;
+    }
+}
+static int touch_read_point(size_t n, uint16_t* out_x, uint16_t* out_y) {
+    if (touch_count == 0 || n >= touch_count) {
+        if (out_x != NULL) {
+            *out_x = 0;
+        }
+        if (out_y != NULL) {
+            *out_y = 0;
+        }
+        return 0;
+    }
+    uint16_t x = touch_x_data[n];
+    uint16_t y = touch_y_data[n];
+    if (x >= 240) {
+        x = 240 - 1;
+    }
+    if (y >= 320) {
+        y = 320 - 1;
+    }
+    touch_translate(&x, &y);
+    if (out_x != NULL) {
+        *out_x = x;
+    }
+    if (out_y != NULL) {
+        *out_y = y;
+    }
+    return 1;
+}
+int touch_xy(uint16_t* out_x, uint16_t* out_y) {
+    if(!touch_update()) {
+        ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
+    }
+    return touch_read_point(0,out_x,out_y);
+}
+int touch_xy2(uint16_t* out_x, uint16_t* out_y) {
+    if(!touch_update()) {
+        ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
+    }
+    return touch_read_point(1,out_x,out_y);
+}
