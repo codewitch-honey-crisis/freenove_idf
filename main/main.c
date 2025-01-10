@@ -13,7 +13,6 @@ void camera_on_frame();
 static void* lcd_transfer_buffer1=NULL;
 static void* lcd_transfer_buffer2=NULL;
 static volatile int lcd_dma_sel = 0;
-static volatile int lcd_flushing = 0;
 
 static void* lcd_transfer_buffer() {
     return lcd_dma_sel?lcd_transfer_buffer1:lcd_transfer_buffer2;    
@@ -114,6 +113,4 @@ void camera_on_frame() {
             vTaskDelay(1);
         }        
     }
-    
-
 }
