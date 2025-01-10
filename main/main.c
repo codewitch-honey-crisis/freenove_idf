@@ -45,7 +45,7 @@ static void lcd_clear_screen(uint16_t color) {
 static const bool big_cam =true;
 void app_main(void)
 {
-    static const size_t max_size = 320*24*2;
+    static const size_t max_size =big_cam? 240*32*2:96*96*2;
     lcd_initialize(max_size);
     
     lcd_transfer_buffer1 = heap_caps_malloc(max_size,MALLOC_CAP_DMA);
