@@ -5,10 +5,10 @@
 #include <driver/spi_master.h>
 #include <hal/gpio_ll.h>
 #include <esp_task_wdt.h>
-#define PIN_DC 0
-#define PIN_CS 47
-#define PIN_MOSI 20
-#define PIN_CLK 21
+#define LCD_DC 0
+#define LCD_CS 47
+#define LCD_MOSI 20
+#define LCD_CLK 21
 #define LCD_SPEED (80*1000*1000)
 
 #define CAM_SIOD 4
@@ -30,8 +30,8 @@
 
 #define LED 2
 
-#define DC_C GPIO.out_w1tc = (1 << PIN_DC);
-#define DC_D GPIO.out_w1ts = (1 << PIN_DC);
+#define DC_C GPIO.out_w1tc = (1 << LCD_DC);
+#define DC_D GPIO.out_w1ts = (1 << LCD_DC);
 
 enum {
     CAM_ALLOC_FB_PSRAM=(1<<0),
@@ -53,7 +53,7 @@ static int camera_rot = 0;
 static void camera_rotation(int rotation) {
     camera_rot = rotation&3;
 }
-static void camera_copy_rotate(void* bitmap, int rows, int cols) {
+static void camera_copy_rotate(const void* bitmap, int rows, int cols) {
     // allocating space for the new rotated image
     const uint16_t* original = (const uint16_t*)bitmap;
     uint16_t* out = (uint16_t*)camera_fb;
@@ -343,6 +343,26 @@ static void lcd_write_bitmap(const void* data_in, uint32_t len) {
         lcd_on_flush_complete();
     }
 }
+static int lcd_rot = 0;
+static void lcd_rotation(int rotation) {
+    uint8_t param;
+    switch (rotation & 3) {
+        case 1:
+            param = (0x40 | 0x20 | 0x08);
+            break;
+        case 2:
+            param = (0x40 | 0x80 | 0x08);
+            break;
+        case 3:
+            param = (0x20 | 0x80 | 0x08);
+            break;
+        default:  // case 0:
+            param = (0x08);
+            break;
+    };
+    lcd_command(0x36, &param, 1);
+    lcd_rot = rotation;
+}
 static void lcd_clear_screen(uint16_t color) {
     uint16_t* p1 = lcd_transfer_buffer1;
     uint16_t* p2 = lcd_transfer_buffer2;
@@ -359,7 +379,7 @@ static void lcd_clear_screen(uint16_t color) {
         lcd_switch_buffers();
     }
 }
-static const bool big_cam =false;
+static const bool big_cam =true;
 void app_main(void)
 {
     memset(lcd_trans,0,sizeof(spi_transaction_t)*14);
@@ -372,12 +392,12 @@ void app_main(void)
     gpio_config_t gpio_conf;
     gpio_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_conf.mode = GPIO_MODE_OUTPUT;
-    gpio_conf.pin_bit_mask = (((unsigned long long)1) << PIN_DC);
+    gpio_conf.pin_bit_mask = (((unsigned long long)1) << LCD_DC);
     gpio_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&gpio_conf);
-    gpio_set_direction((gpio_num_t)PIN_CS, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)PIN_CS, 0);
+    gpio_set_direction((gpio_num_t)LCD_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)LCD_CS, 0);
 
     gpio_set_direction((gpio_num_t)LED, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)LED, 0);
@@ -385,8 +405,8 @@ void app_main(void)
     const spi_host_device_t host = SPI3_HOST;
     spi_bus_config_t buscfg;
     memset(&buscfg, 0, sizeof(buscfg));
-    buscfg.sclk_io_num = PIN_CLK;
-    buscfg.mosi_io_num = PIN_MOSI;
+    buscfg.sclk_io_num = LCD_CLK;
+    buscfg.mosi_io_num = LCD_MOSI;
     buscfg.miso_io_num = -1;
     buscfg.quadwp_io_num = -1;
     buscfg.quadhd_io_num = -1;    
@@ -399,7 +419,7 @@ void app_main(void)
     dev_cfg.dummy_bits = 0;
     dev_cfg.queue_size = 14;
     dev_cfg.flags = SPI_DEVICE_NO_DUMMY | SPI_DEVICE_HALFDUPLEX;
-    dev_cfg.spics_io_num = PIN_CS;
+    dev_cfg.spics_io_num = LCD_CS;
     dev_cfg.pre_cb = lcd_spi_pre_cb;
     dev_cfg.post_cb = lcd_spi_post_cb;
     dev_cfg.clock_speed_hz = LCD_SPEED;
@@ -409,11 +429,11 @@ void app_main(void)
     // if we don't configure GPIO 0 after we init the SPI it stays high for some reason
     gpio_config_t io_conf;
     memset(&io_conf, 0, sizeof(io_conf));
-    io_conf.pin_bit_mask = (1ULL << PIN_DC);
+    io_conf.pin_bit_mask = (1ULL << LCD_DC);
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io_conf);
-    gpio_set_level((gpio_num_t)PIN_DC, 0);
+    gpio_set_level((gpio_num_t)LCD_DC, 0);
     
     lcd_st7789_init();
 
@@ -427,7 +447,8 @@ void app_main(void)
     wdt_config.timeout_ms = 30*1000;
     wdt_config.trigger_panic = 0;
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_config));
-    camera_rotation(1);
+    camera_rotation(3);
+    lcd_rotation(3);
     while(true) {
         uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
@@ -451,7 +472,7 @@ void camera_on_frame() {
         camera_copy_rotate(bmp,240,240);
         camera_unlock_frame_buffer();
         for(int y=0;y<240;y+=24) {
-            const uint8_t* data = lcd_transfer_buffer();
+            uint8_t* data = lcd_transfer_buffer();
             memcpy(data,((const uint8_t*)camera_fb)+(y*240*2),size*2);
             if(lcd_wait_dma(400)) {
                 lcd_switch_buffers();
