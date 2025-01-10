@@ -20,7 +20,14 @@ enum {
 enum {
     TOUCH_THRESH_DEFAULT = 32
 };
-
+enum {
+    AUDIO_44_1K_STEREO=0,
+    AUDIO_44_1K_MONO,
+    AUDIO_22K_STEREO,
+    AUDIO_22K_MONO,
+    AUDIO_11K_STEREO,
+    AUDIO_11K_MONO,
+};
 // optionally implemented by user: notify when transfer complete
 extern IRAM_ATTR void lcd_on_flush_complete() __attribute__((weak));
 extern void lcd_initialize(size_t max_transfer_size);
@@ -49,4 +56,11 @@ extern void touch_rotation(int rotation);
 extern int touch_xy(uint16_t* out_x, uint16_t* out_y);
 extern int touch_xy2(uint16_t* out_x, uint16_t* out_y);
 extern void touch_deinitialize();
+
+extern const size_t audio_max_samples;
+extern void audio_initialize(int format);
+extern void audio_deinitialize();
+extern size_t audio_write_int16(const int16_t* samples, size_t sample_count);
+extern size_t audio_write_float(const float* samples, size_t sample_count, float vel);
+
 #endif // FREENOVE_S3_DEVKIT_H

@@ -1,10 +1,11 @@
 #include "freenove_s3_devkit.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
+
 #include <driver/gpio.h>
 #include <driver/i2s_std.h>
 #include <driver/spi_master.h>
 #include <esp_camera.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <hal/gpio_ll.h>
 // TODO: Update the following when the camera component is updated
 #include <driver/i2c.h>
@@ -34,6 +35,10 @@
 #define CAM_PWDN -1
 #define CAM_RST -1
 #define CAM_SPEED (20 * 1000 * 1000)
+
+#define AUD_BCLK 42
+#define AUD_DOUT 41
+#define AUD_LRC 14
 
 #define NEOPIXEL 48
 
@@ -282,25 +287,28 @@ void lcd_flush(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
 }
 static int led_initialized = 0;
 void led_enable(int value) {
-    if(!led_initialized) {
+    if (!led_initialized) {
         return;
     }
-    if(value==0) {
+    if (value == 0) {
         LED_OFF;
     } else {
         LED_ON;
     }
 }
-static int i2c_initialized=0;
+static int i2c_initialized = 0;
 void led_initialize() {
-    if(led_initialized || i2c_initialized) {
+    if (led_initialized || i2c_initialized) {
         return;
     }
     gpio_set_direction((gpio_num_t)LED, GPIO_MODE_OUTPUT);
     LED_OFF;
     led_initialized = true;
 }
-void led_deinitialize() { LED_OFF; led_initialized=false; }
+void led_deinitialize() {
+    LED_OFF;
+    led_initialized = false;
+}
 
 static void* camera_fb = NULL;
 static int camera_rot = 0;
@@ -394,7 +402,7 @@ void camera_initialize(int flags) {
     config.grab_mode = CAMERA_GRAB_LATEST;
     config.fb_location = 0 != (flags & CAM_ALLOC_CAM_PSRAM) ? CAMERA_FB_IN_PSRAM
                                                             : CAMERA_FB_IN_DRAM;
-    config.jpeg_quality = 1;
+    config.jpeg_quality = 10;
     config.fb_count = CAMERA_FB_IN_PSRAM ? 6 : 2;
     ESP_ERROR_CHECK(esp_camera_init(&config));
     sensor_t* s = esp_camera_sensor_get();
@@ -442,7 +450,7 @@ void camera_deinitialize() {
     }
 }
 
-static i2s_chan_handle_t neopixel_handle=NULL;
+static i2s_chan_handle_t neopixel_handle = NULL;
 static uint8_t neopixel_out_buffer[12] = {0};
 static uint8_t neopixel_zero_buffer[48] = {0};
 
@@ -466,19 +474,21 @@ void neopixel_color(uint8_t r, uint8_t g, uint8_t b) {
     neopixel_out_buffer[10] = neopixel_bit_patterns[blue >> 2 & 0x03];
     neopixel_out_buffer[11] = neopixel_bit_patterns[blue & 0x03];
     i2s_channel_enable(neopixel_handle);
-    i2s_channel_write(neopixel_handle, neopixel_out_buffer, sizeof(neopixel_out_buffer), NULL, portMAX_DELAY);
-    i2s_channel_write(neopixel_handle, neopixel_zero_buffer, sizeof(neopixel_zero_buffer), NULL, portMAX_DELAY);
+    i2s_channel_write(neopixel_handle, neopixel_out_buffer,
+                      sizeof(neopixel_out_buffer), NULL, portMAX_DELAY);
+    i2s_channel_write(neopixel_handle, neopixel_zero_buffer,
+                      sizeof(neopixel_zero_buffer), NULL, portMAX_DELAY);
     vTaskDelay(pdMS_TO_TICKS(10));
     i2s_channel_disable(neopixel_handle);
 }
 
 void neopixel_initialize() {
-    if(neopixel_handle!=NULL) {
+    if (neopixel_handle != NULL) {
         return;
     }
 
     i2s_chan_config_t chan_cfg;
-    memset(&chan_cfg,0,sizeof(chan_cfg));
+    memset(&chan_cfg, 0, sizeof(chan_cfg));
     chan_cfg.id = I2S_NUM_1;
     chan_cfg.role = I2S_ROLE_MASTER;
     chan_cfg.dma_desc_num = 4;
@@ -488,9 +498,8 @@ void neopixel_initialize() {
 
     i2s_new_channel(&chan_cfg, &neopixel_handle, NULL);
 
-
     i2s_std_config_t std_cfg;
-    memset(&std_cfg,0,sizeof(std_cfg));
+    memset(&std_cfg, 0, sizeof(std_cfg));
     std_cfg.clk_cfg.sample_rate_hz = 93650;
     std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_PLL_160M;
     std_cfg.clk_cfg.mclk_multiple = 128;
@@ -513,7 +522,7 @@ void neopixel_initialize() {
 }
 
 void neopixel_deinitialize() {
-    if(neopixel_handle==NULL) {
+    if (neopixel_handle == NULL) {
         return;
     }
     i2s_channel_disable(neopixel_handle);
@@ -522,19 +531,19 @@ void neopixel_deinitialize() {
 };
 
 static void i2c_initialize() {
-    if(led_initialized||i2c_initialized) {
+    if (led_initialized || i2c_initialized) {
         return;
     }
     i2c_config_t config;
-    memset(&config,0,sizeof(config));
-    config.master.clk_speed = 100*1000;
+    memset(&config, 0, sizeof(config));
+    config.master.clk_speed = 100 * 1000;
     config.mode = I2C_MODE_MASTER;
     config.scl_io_num = I2C_SCL;
     config.sda_io_num = I2C_SDA;
     config.scl_pullup_en = 1;
     config.sda_pullup_en = 1;
-    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0,&config));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0,I2C_MODE_MASTER,0,0,0));
+    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &config));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
     i2c_initialized = 1;
 }
 // static void i2c_deinitialize() {
@@ -552,26 +561,27 @@ static size_t touch_count = 0;
 static uint16_t touch_x_data[2], touch_y_data[2], touch_id_data[2];
 static int touch_write_reg(int r, int value) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if(ESP_OK!=i2c_master_start(cmd)) {
+    if (ESP_OK != i2c_master_start(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_write_byte(cmd, 0x38 << 1 | I2C_MASTER_WRITE, I2C_MASTER_ACK)) {
+    if (ESP_OK != i2c_master_write_byte(cmd, 0x38 << 1 | I2C_MASTER_WRITE,
+                                        I2C_MASTER_ACK)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
     uint8_t data[2];
-    data[0]=r;
-    data[1]=value;
-    if(ESP_OK!=i2c_master_write(cmd,data,sizeof(data),I2C_MASTER_ACK)) {
+    data[0] = r;
+    data[1] = value;
+    if (ESP_OK != i2c_master_write(cmd, data, sizeof(data), I2C_MASTER_ACK)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_stop(cmd)) {
+    if (ESP_OK != i2c_master_stop(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0,cmd,portMAX_DELAY)) {
+    if (ESP_OK != i2c_master_cmd_begin(I2C_NUM_0, cmd, portMAX_DELAY)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
@@ -581,48 +591,49 @@ static int touch_write_reg(int r, int value) {
 static int touch_read_all() {
     static const uint8_t ACK_CHECK_EN = 0x1;
     uint8_t i2cdat[16];
-        // Read data
+    // Read data
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    if(ESP_OK!=i2c_master_start(cmd)) {
+    if (ESP_OK != i2c_master_start(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_write_byte(cmd, (0x38<<1), ACK_CHECK_EN)) {
+    if (ESP_OK != i2c_master_write_byte(cmd, (0x38 << 1), ACK_CHECK_EN)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_write_byte(cmd, 0, ACK_CHECK_EN)) {
+    if (ESP_OK != i2c_master_write_byte(cmd, 0, ACK_CHECK_EN)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_stop(cmd)) {
+    if (ESP_OK != i2c_master_stop(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS( 1000))) {
+    if (ESP_OK != i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000))) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
     i2c_cmd_link_delete(cmd);
-    
+
     cmd = i2c_cmd_link_create();
-    if(ESP_OK!=i2c_master_start(cmd)) {
+    if (ESP_OK != i2c_master_start(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_write_byte(cmd, (0x38<<1)|1, ACK_CHECK_EN)) {
+    if (ESP_OK != i2c_master_write_byte(cmd, (0x38 << 1) | 1, ACK_CHECK_EN)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_read(cmd, i2cdat, sizeof(i2cdat),  I2C_MASTER_LAST_NACK)) {
+    if (ESP_OK !=
+        i2c_master_read(cmd, i2cdat, sizeof(i2cdat), I2C_MASTER_LAST_NACK)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_stop(cmd)) {
+    if (ESP_OK != i2c_master_stop(cmd)) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
-    if(ESP_OK!=i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000))) {
+    if (ESP_OK != i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000))) {
         i2c_cmd_link_delete(cmd);
         return 0;
     }
@@ -645,34 +656,32 @@ static int touch_read_all() {
     return 1;
 }
 void touch_initialize(int threshhold) {
-    if(touch_initialized) {
+    if (touch_initialized) {
         return;
     }
     i2c_initialize();
-    if(0==touch_write_reg(0x80, threshhold)) {
+    if (0 == touch_write_reg(0x80, threshhold)) {
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
     }
-    
+
     touch_count = 0;
     touch_initialized = 1;
 }
 void touch_deinitialize() {
-    if(!touch_initialized) {
+    if (!touch_initialized) {
         return;
     }
     // nothing for now
     touch_initialized = 0;
 }
-void touch_rotation(int rotation) {
-    touch_rot = rotation&3;
-}
+void touch_rotation(int rotation) { touch_rot = rotation & 3; }
 static int touch_update() {
-    if(!touch_initialized) {
+    if (!touch_initialized) {
         return 0;
     }
     uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
-    if(ms>touch_timestamp+13) {
-        if(!touch_read_all()) {
+    if (ms > touch_timestamp + 13) {
+        if (!touch_read_all()) {
             return 0;
         }
         touch_timestamp = ms;
@@ -727,14 +736,127 @@ static int touch_read_point(size_t n, uint16_t* out_x, uint16_t* out_y) {
     return 1;
 }
 int touch_xy(uint16_t* out_x, uint16_t* out_y) {
-    if(!touch_update()) {
+    if (!touch_update()) {
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
     }
-    return touch_read_point(0,out_x,out_y);
+    return touch_read_point(0, out_x, out_y);
 }
 int touch_xy2(uint16_t* out_x, uint16_t* out_y) {
-    if(!touch_update()) {
+    if (!touch_update()) {
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
     }
-    return touch_read_point(1,out_x,out_y);
+    return touch_read_point(1, out_x, out_y);
+}
+
+static uint16_t* audio_out_buffer = NULL;
+static i2s_chan_handle_t audio_handle = NULL;
+const size_t audio_max_samples = 1024;
+
+void audio_initialize(int format) {
+    static_assert(audio_max_samples <= 1024, "audio sample buffer too big");
+    if (audio_out_buffer != NULL) {
+        return;
+    }
+    audio_out_buffer = (uint16_t*)heap_caps_malloc(
+        audio_max_samples * sizeof(uint16_t), MALLOC_CAP_DEFAULT);
+    if (audio_out_buffer == NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    /* This helper macro is defined in `i2s_common.h` and shared by all the I2S
+     * communication modes. It can help to specify the I2S role and port ID */
+    i2s_chan_config_t chan_cfg =
+        I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    /* Allocate a new TX channel and get the handle of this channel */
+    i2s_new_channel(&chan_cfg, &audio_handle, NULL);
+
+    /* Setting the configurations, the slot configuration and clock
+     * configuration can be generated by the macros These two helper macros are
+     * defined in `i2s_std.h` which can only be used in STD mode. They can help
+     * to specify the slot and clock configurations for initialization or
+     * updating */
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                    I2S_SLOT_MODE_STEREO),
+        .gpio_cfg =
+            {
+                .mclk = I2S_GPIO_UNUSED,
+                .bclk = AUD_BCLK,
+                .ws = AUD_LRC,
+                .dout = AUD_DOUT,
+                .din = I2S_GPIO_UNUSED,
+                .invert_flags =
+                    {
+                        .mclk_inv = false,
+                        .bclk_inv = false,
+                        .ws_inv = false,
+                    },
+            },
+    };
+    /* Initialize the channel */
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(audio_handle, &std_cfg));
+
+    /* Before writing data, start the TX channel first */
+    ESP_ERROR_CHECK(i2s_channel_enable(audio_handle));
+}
+void audio_deinitialize() {
+    if (audio_out_buffer == NULL) {
+        return;
+    }
+    i2s_channel_disable(audio_handle);
+    i2s_del_channel(audio_handle);
+    audio_handle = NULL;
+    free(audio_out_buffer);
+    audio_out_buffer = NULL;
+}
+size_t audio_write_int16(const int16_t* samples, size_t sample_count) {
+    size_t result = 0;
+    const int16_t* p = (const int16_t*)samples;
+    uint16_t* out = audio_out_buffer;
+    while (sample_count) {
+        size_t to_write =
+            sample_count < audio_max_samples ? sample_count : audio_max_samples;
+        for (int i = 0; i < to_write; ++i) {
+            *(out++) = (uint16_t)(*(p++) + 32768);
+        }
+        size_t written = to_write * 2;
+        i2s_channel_write(audio_handle, audio_out_buffer, to_write * 2,
+                          &written, portMAX_DELAY);
+        size_t samples_written = written >> 1;
+        sample_count -= samples_written;
+        result += samples_written;
+        if (samples_written != to_write) {
+            return samples_written;
+        }
+    }
+    return result;
+}
+
+size_t audio_write_float(const float* samples, size_t sample_count, float vel) {
+    size_t result = 0;
+    const float* p = (const float*)samples;
+    uint16_t* out = audio_out_buffer;
+    while (sample_count) {
+        size_t to_write =
+            sample_count < audio_max_samples ? sample_count : audio_max_samples;
+        for (int i = 0; i < to_write; ++i) {
+            float fval = *(p++) * vel;
+            if (fval < -1.f)
+                fval = -1.f;
+            else if (fval > 1.f)
+                fval = 1.f;
+            int16_t val = fval > 0 ? fval * 32767 : fval * 32768;
+            *(out++) = (uint16_t)(val + 32768);
+        }
+        size_t written;
+        i2s_channel_write(audio_handle, audio_out_buffer, to_write * 2,
+                          &written, portMAX_DELAY);
+        size_t samples_written = written >> 1;
+        sample_count -= samples_written;
+        result += samples_written;
+        if (samples_written != to_write) {
+            return samples_written;
+        }
+    }
+    return result;
 }
