@@ -48,46 +48,49 @@ enum {
 };
 
 void camera_on_frame();
-
-// void camera_copy_rotate(void* bitmap, int rows, int cols) {
-//     // allocating space for the new rotated image
-//     const uint16_t* original = (const uint16_t*)bitmap;
-//     uint16_t* out = (uint16_t*)camera_fb;
-//     size_t count;
-//     switch (camera_rot) {
-//         case 1: 
-//             // rotate 90
-//             for (int y = 0; y < rows; ++y) {
-//                 for (int x = 0; x < cols; ++x) {
-//                     out[(cols - x - 1) * rows + y] = *(original++);
-//                 }
-//             }
-//             break;
-//         case 2: 
-//             // rotate 180
-//             for (int y = 0; y < rows; ++y) {
-//                 for (int x = 0; x < cols; ++x) {
-//                     out[(rows - y - 1) * cols + (cols - x - 1)] = *(original++);
-//                 }
-//             }
-//             break;
-//         case 3: 
-//             // rotate 270
-//             for (int y = 0; y < rows; ++y) {
-//                 for (int x = 0; x < cols; ++x) {
-//                     out[x * rows + (rows - y - 1)] = *(original++);
-//                 }
-//             }
-//             break;
-//         default:  // case 0:
-//             count = rows*cols;
-//             while(count--) {
-//                 *(out++)=*(original++);
-//             }
-//             break;
-//     }
-// }
-
+static void* camera_fb = NULL;
+static int camera_rot = 0;
+static void camera_rotation(int rotation) {
+    camera_rot = rotation&3;
+}
+static void camera_copy_rotate(void* bitmap, int rows, int cols) {
+    // allocating space for the new rotated image
+    const uint16_t* original = (const uint16_t*)bitmap;
+    uint16_t* out = (uint16_t*)camera_fb;
+    size_t count;
+    switch (camera_rot) {
+        case 1: 
+            // rotate 90
+            for (int y = 0; y < rows; ++y) {
+                for (int x = 0; x < cols; ++x) {
+                    out[(cols - x - 1) * rows + y] = *(original++);
+                }
+            }
+            break;
+        case 2: 
+            // rotate 180
+            for (int y = 0; y < rows; ++y) {
+                for (int x = 0; x < cols; ++x) {
+                    out[(rows - y - 1) * cols + (cols - x - 1)] = *(original++);
+                }
+            }
+            break;
+        case 3: 
+            // rotate 270
+            for (int y = 0; y < rows; ++y) {
+                for (int x = 0; x < cols; ++x) {
+                    out[x * rows + (rows - y - 1)] = *(original++);
+                }
+            }
+            break;
+        default:  // case 0:
+            count = rows*cols;
+            while(count--) {
+                *(out++)=*(original++);
+            }
+            break;
+    }
+}
 static bool camera_initialized = false;
 static camera_fb_t* camera_current_fb = NULL;
 const void* camera_lock_frame_buffer() {
@@ -149,6 +152,11 @@ void camera_initialize(int flags) {
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
     camera_initialized = true;
+    const size_t camera_size = (flags&CAM_FRAME_SIZE_96X96)?96*96*2:240*240*2;
+    camera_fb = heap_caps_malloc(camera_size,(flags&CAM_ALLOC_FB_PSRAM)?MALLOC_CAP_SPIRAM:MALLOC_CAP_DEFAULT);
+    if(camera_fb==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
 }
 void camera_levels(int brightness, int contrast,
                    int saturation, int sharpness) {
@@ -173,6 +181,10 @@ void camera_deinitialize() {
     camera_current_fb = NULL;
     camera_initialized=false;
     esp_camera_deinit();
+    if(camera_fb!=NULL) {
+        free(camera_fb);
+        camera_fb=NULL;
+    }
 }
 static const size_t lcd_transfer_buffer_size = 32760;//240*32*2;
 static void* lcd_transfer_buffer1=NULL;
@@ -347,7 +359,7 @@ static void lcd_clear_screen(uint16_t color) {
         lcd_switch_buffers();
     }
 }
-static const bool big_cam =true;
+static const bool big_cam =false;
 void app_main(void)
 {
     memset(lcd_trans,0,sizeof(spi_transaction_t)*14);
@@ -415,6 +427,7 @@ void app_main(void)
     wdt_config.timeout_ms = 30*1000;
     wdt_config.trigger_panic = 0;
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_config));
+    camera_rotation(1);
     while(true) {
         uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
@@ -435,41 +448,41 @@ void camera_on_frame() {
     if(big_cam) {
         static const size_t size = 240*24;
         const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer();
-        if(bmp!=NULL) {
-            for(int y=0;y<240;y+=24) {
-                uint8_t* data = lcd_transfer_buffer();
-                memcpy(data,bmp+(y*240*2),size*2);
-                if(lcd_wait_dma(400)) {
-                    lcd_switch_buffers();
-                    lcd_set_window(0,y,239,y+23);
-                    lcd_write_bitmap(data,size);
-                } else {
-                    puts("LCD flush timeout");
-                    vTaskDelay(1);
-                }
-                
-                
-            }
-        }
+        camera_copy_rotate(bmp,240,240);
         camera_unlock_frame_buffer();
-
-    } else {
-        static const size_t size = 96*96;
-        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer();
-        if(bmp!=NULL) {
-            uint8_t* data = lcd_transfer_buffer();
-            memcpy(data,bmp,size*2);
+        for(int y=0;y<240;y+=24) {
+            const uint8_t* data = lcd_transfer_buffer();
+            memcpy(data,((const uint8_t*)camera_fb)+(y*240*2),size*2);
             if(lcd_wait_dma(400)) {
                 lcd_switch_buffers();
-                lcd_set_window(0,0,95,95);
+                lcd_set_window(0,y,239,y+23);
                 lcd_write_bitmap(data,size);
             } else {
                 puts("LCD flush timeout");
                 vTaskDelay(1);
             }
-        } 
+            
+            
+        }
+    
         camera_unlock_frame_buffer();
-        
+
+    } else {
+        static const size_t size = 96*96;
+        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer();
+        camera_copy_rotate(bmp,96,96);
+        camera_unlock_frame_buffer();
+    
+        uint8_t* data = lcd_transfer_buffer();
+        memcpy(data,camera_fb,size*2);
+        if(lcd_wait_dma(400)) {
+            lcd_switch_buffers();
+            lcd_set_window(0,0,95,95);
+            lcd_write_bitmap(data,size);
+        } else {
+            puts("LCD flush timeout");
+            vTaskDelay(1);
+        }        
     }
     
 
