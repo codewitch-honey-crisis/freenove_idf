@@ -47,10 +47,6 @@ enum {
     CAM_HIGHEST
 };
 
-// static TaskHandle_t camera_task_handle;  // camera thread task handle
-// static uint8_t* camera_fb = NULL;
-// static SemaphoreHandle_t camera_fb_lock = NULL;
-// static uint8_t camera_rot = 0;
 void camera_on_frame();
 
 // void camera_copy_rotate(void* bitmap, int rows, int cols) {
@@ -91,52 +87,31 @@ void camera_on_frame();
 //             break;
 //     }
 // }
-// camera thread
-/*void camera_task(void* pvParameters) {
-    camera_fb_t* fb_buf = NULL;
-    while (true) {
-        fb_buf = esp_camera_fb_get();
-        if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
-           // if (pdTRUE == xSemaphoreTake(camera_fb_lock, 50  )) {
-                // double lock protection
-               // if (fb_buf != NULL && camera_fb != NULL && fb_buf->buf!=NULL) {
-                    //camera_copy_rotate(fb_buf->buf, fb_buf->width, fb_buf->height);
-               // }
-                //xSemaphoreGive(camera_fb_lock);
-            //} 
-        }
-        esp_camera_fb_return(fb_buf);
-        
-           
-    }
-}*/
+
+static bool camera_initialized = false;
 static camera_fb_t* camera_current_fb = NULL;
-const void* camera_lock_frame_buffer(bool wait) {
-    // if (camera_fb != NULL &&
-    //     pdTRUE == xSemaphoreTake(camera_fb_lock, wait ? portMAX_DELAY : 0)) {
-    //     return camera_fb;
-    // }
+const void* camera_lock_frame_buffer() {
+    if(!camera_initialized) {
+        return NULL;
+    }
     camera_current_fb=esp_camera_fb_get();
     if(camera_current_fb!=NULL) {
         return camera_current_fb->buf;
     }
     return NULL;
 }
-// void camera_rotation(uint8_t rotation) {
-//     if (camera_fb == NULL) {
-//         camera_rot = rotation & 3;
-//         return;
-//     }
-//     xSemaphoreTake(camera_fb_lock, portMAX_DELAY);
-//     camera_rot = rotation & 3;
-//     xSemaphoreGive(camera_fb_lock);
-// }
-void camera_unlock_frame_buffer() { //xSemaphoreGive(camera_fb_lock); 
+
+void camera_unlock_frame_buffer() { 
+    if(!camera_initialized) {
+        return;
+    }
     esp_camera_fb_return(camera_current_fb);
     camera_current_fb = NULL;
 }
 void camera_initialize(int flags) {
-
+    if(camera_initialized) {
+        return;
+    }
     camera_config_t config;
     memset(&config, 0, sizeof(config));
     config.ledc_channel = LEDC_CHANNEL_0;
@@ -173,8 +148,7 @@ void camera_initialize(int flags) {
     s->set_hmirror(s, 1);     // horizontal mirror image
     s->set_brightness(s, 0);  // up the brightness just a bit
     s->set_saturation(s, 0);  // lower the saturation
-    // xTaskCreatePinnedToCore(camera_task, "camera_task", 8 * 1024, NULL, 10,
-    //             &camera_task_handle,xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
+    camera_initialized = true;
 }
 void camera_levels(int brightness, int contrast,
                    int saturation, int sharpness) {
@@ -193,17 +167,11 @@ void camera_levels(int brightness, int contrast,
     }
 }
 void camera_deinitialize() {
-    // if (camera_task_handle != NULL) {
-    //     vTaskDelete(camera_task_handle);
-    //     camera_task_handle = NULL;
-    // }
-    // if (camera_fb != NULL) {
-    //     free(camera_fb);
-    //     camera_fb = NULL;
-    // }
-    // if (camera_fb_lock != NULL) {
-    //     vSemaphoreDelete(camera_fb_lock);
-    // }
+    if(!camera_initialized) {
+        return;
+    }
+    camera_current_fb = NULL;
+    camera_initialized=false;
     esp_camera_deinit();
 }
 static const size_t lcd_transfer_buffer_size = 32760;//240*32*2;
@@ -264,9 +232,7 @@ static void lcd_command(uint8_t cmd, const uint8_t* args,
 IRAM_ATTR void lcd_spi_pre_cb(spi_transaction_t* trans) {
     if (((int)trans->user) == 0) {
         DC_C;
-    } else {
-        DC_D;
-    }
+    } 
 }
 IRAM_ATTR void lcd_spi_post_cb(spi_transaction_t* trans) {
     
@@ -275,8 +241,6 @@ IRAM_ATTR void lcd_spi_post_cb(spi_transaction_t* trans) {
         DC_D;
     } else {
         if (((int)trans->user) == 2) {
-            
-            //gpio_set_level(LED,1);    
             lcd_on_flush_complete();
         }
     }
@@ -346,7 +310,6 @@ static void lcd_set_window(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
     lcd_command(0x2B, args, 4);
 }
 static void lcd_write_bitmap(const void* data_in, uint32_t len) {
-    //gpio_set_level(LED,0);
     if (len) {
         spi_transaction_t* tx=&lcd_trans[lcd_trans_index++]; if(lcd_trans_index>13) lcd_trans_index=0;
         tx->user = (void*)0;
@@ -368,9 +331,6 @@ static void lcd_write_bitmap(const void* data_in, uint32_t len) {
         lcd_on_flush_complete();
     }
 }
-// static uint16_t swap16(uint16_t value) {
-//     return (uint16_t)((value&0xFF)<<8)|((value&0xFF00)>>8);
-// }
 static void lcd_clear_screen(uint16_t color) {
     uint16_t* p1 = lcd_transfer_buffer1;
     uint16_t* p2 = lcd_transfer_buffer2;
@@ -469,13 +429,12 @@ void app_main(void)
             total_ms=0;
             frames = 0;
         }
-        //vTaskDelay(1);
     }
 }
 void camera_on_frame() {
     if(big_cam) {
         static const size_t size = 240*24;
-        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer(false);
+        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer();
         if(bmp!=NULL) {
             for(int y=0;y<240;y+=24) {
                 uint8_t* data = lcd_transfer_buffer();
@@ -496,7 +455,7 @@ void camera_on_frame() {
 
     } else {
         static const size_t size = 96*96;
-        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer(false);
+        const uint8_t* bmp=(const uint8_t*)camera_lock_frame_buffer();
         if(bmp!=NULL) {
             uint8_t* data = lcd_transfer_buffer();
             memcpy(data,bmp,size*2);
