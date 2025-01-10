@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include "esp_attr.h"
 enum {
+    CAM_DEFAULT = 0,
     CAM_ALLOC_FB_PSRAM=(1<<0),
     CAM_ALLOC_CAM_PSRAM=(1<<1),
     CAM_FRAME_SIZE_96X96=(1<<2)
@@ -34,4 +35,8 @@ extern void camera_levels(int brightness, int contrast,
 extern void camera_rotation(int rotation);
 extern const void* camera_frame_buffer();
 extern void camera_deinitialize();
+
+extern void neopixel_initialize();
+extern void neopixel_color(uint8_t r, uint8_t g, uint8_t b);
+extern void neopixel_deinitialize();
 #endif // FREENOVE_S3_DEVKIT_H

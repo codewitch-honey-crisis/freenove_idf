@@ -67,7 +67,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&wdt_config));
     camera_rotation(3);
     lcd_rotation(3);
+    //neopixel_initialize();
     printf("Free SRAM: %0.2fKB, free PSRAM: %0.2fMB\n",heap_caps_get_free_size(MALLOC_CAP_INTERNAL)/1024.f,heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024.f/1024.f);
+    
+    int toggle = 0;
     while(true) {
         uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
@@ -76,6 +79,8 @@ void app_main(void)
         total_ms+=(end_ms-start_ms);
         if(end_ms>ts_ms+1000) {
             ts_ms = end_ms;
+            toggle = !toggle;
+            //neopixel_color(255*toggle,255*toggle,255*toggle);
             if(frames>0) {
                 printf("FPS: %d, avg ms: %0.2f\n",frames,(float)total_ms/(float)frames);
             }
