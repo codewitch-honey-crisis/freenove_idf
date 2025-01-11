@@ -44,6 +44,7 @@
 
 #define I2C_SCL 1
 #define I2C_SDA 2
+#define I2C_SPEED (200*1000)
 
 #define DC_C GPIO.out_w1tc = (1 << LCD_DC);
 #define DC_D GPIO.out_w1ts = (1 << LCD_DC);
@@ -536,7 +537,7 @@ static void i2c_initialize() {
     }
     i2c_config_t config;
     memset(&config, 0, sizeof(config));
-    config.master.clk_speed = 100 * 1000;
+    config.master.clk_speed = I2C_SPEED;
     config.mode = I2C_MODE_MASTER;
     config.scl_io_num = I2C_SCL;
     config.sda_io_num = I2C_SDA;
@@ -859,4 +860,444 @@ size_t audio_write_float(const float* samples, size_t sample_count, float vel) {
         }
     }
     return result;
+}
+static int prox_sensor_initialized = 0;
+static uint8_t proc_sensor_active_leds = 0;
+typedef struct {
+    uint32_t red[4];
+    uint32_t IR[4];
+    uint32_t green[4];
+    uint8_t head;
+    uint8_t tail;
+} prox_sensor_info_t;  // This is our circular buffer of readings from the
+                       // sensor
+
+static prox_sensor_info_t prox_sensor_data;
+//
+static esp_err_t prox_sensor_read(uint8_t* data_rd, size_t size) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x57 << 1) | I2C_MASTER_READ, I2C_MASTER_NACK);
+    i2c_master_read(cmd, data_rd, size, I2C_MASTER_LAST_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+static esp_err_t prox_sensor_write(uint8_t* data_wr, size_t size) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x57 << 1) | I2C_MASTER_WRITE, I2C_MASTER_NACK);
+    i2c_master_write(cmd, data_wr, size, I2C_MASTER_ACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+static void prox_sensor_read_reg(uint8_t reg_addr, uint8_t* data_reg,
+                                 size_t bytes_to_read) {
+    ESP_ERROR_CHECK(prox_sensor_write(&reg_addr, 1));
+    ESP_ERROR_CHECK(prox_sensor_read(data_reg, bytes_to_read));
+}
+
+static void prox_sensor_write_reg(uint8_t command, uint8_t reg) {
+    uint8_t data[2];
+    data[0] = reg;
+    data[1] = command;
+    ESP_ERROR_CHECK(prox_sensor_write(data, 2));
+}
+// Given a register, read it, mask it, and then set the thing
+static void prox_sensor_mask_reg(uint8_t reg, uint8_t mask, uint8_t thing) {
+    // Grab current register context
+    uint8_t originalContents;
+    prox_sensor_read_reg(reg, &originalContents, 1);
+    // Zero-out the portions of the register we're interested in
+    originalContents = originalContents & mask;
+
+    // Change contents
+    prox_sensor_write_reg(reg, originalContents | thing);
+}
+
+// Read the FIFO Write Pointer
+static uint8_t prox_sensor_write_pointer(void) {
+    uint8_t result;
+    prox_sensor_read_reg(0x04, &result, 1);
+    return result;
+}
+
+// Read the FIFO Read Pointer
+static uint8_t prox_sensor_read_pointer(void) {
+    uint8_t result;
+    prox_sensor_read_reg(0x06, &result, 1);
+    return result;
+}
+static void prox_sensor_soft_reset(void) {
+    prox_sensor_mask_reg(0x09, 0xBF, 0x40);
+    // Poll for bit to clear, reset is then complete
+    // Timeout after 100ms
+    uint32_t startTime = pdTICKS_TO_MS(xTaskGetTickCount());
+    while (pdTICKS_TO_MS(xTaskGetTickCount()) - startTime < 100) {
+        uint8_t response;
+        prox_sensor_read_reg(0x09, &response, 1);
+        if ((response & 0x40) == 0) break;  // We're done!
+        vTaskDelay(pdMS_TO_TICKS(1));       // Let's not over burden the I2C bus
+    }
+}
+
+static void prox_sensor_led_mode(uint8_t mode) {
+    // Set which LEDs are used for sampling -- Red only, RED+IR only, or custom.
+    // See datasheet, page 19
+    prox_sensor_mask_reg(0x09, 0xF8, mode);
+}
+
+static void proc_sensor_adc_range(uint8_t adcRange) {
+    // adcRange: one of MAX30105_ADCRANGE_2048, _4096, _8192, _16384
+    prox_sensor_mask_reg(0x0A, 0x9F, adcRange);
+}
+
+static void prox_sensor_sample_rate(uint8_t sampleRate) {
+    // sampleRate: one of MAX30105_SAMPLERATE_50, _100, _200, _400, _800, _1000,
+    // _1600, _3200
+    prox_sensor_mask_reg(0x0A, 0xE3, sampleRate);
+}
+
+static void prox_sensor_pulse_width(uint8_t pulseWidth) {
+    // pulseWidth: one of MAX30105_PULSEWIDTH_69, _188, _215, _411
+    prox_sensor_mask_reg(0x0A, 0xFC, pulseWidth);
+}
+
+// NOTE: Amplitude values: 0x00 = 0mA, 0x7F = 25.4mA, 0xFF = 50mA (typical)
+// See datasheet, page 21
+static void prox_sensor_pulse_amp_red(uint8_t amplitude) {
+    prox_sensor_write_reg(0x0C, amplitude);
+}
+
+static void prox_sensor_pulse_amp_ir(uint8_t amplitude) {
+    prox_sensor_write_reg(0x0D, amplitude);
+}
+
+static void prox_sensor_pulse_amp_green(uint8_t amplitude) {
+    prox_sensor_write_reg(0x0C, amplitude);
+}
+
+static void prox_sensor_pulse_amp_prox(uint8_t amplitude) {
+    prox_sensor_write_reg(0x10, amplitude);
+}
+
+// Set sample average (Table 3, Page 18)
+static void prox_sensor_fifo_average(uint8_t numberOfSamples) {
+    prox_sensor_mask_reg(0x08, (uint8_t)~0b11100000, numberOfSamples);
+}
+
+// Resets all points to start in a known state
+// Page 15 recommends clearing FIFO before beginning a read
+void prox_sensor_clear_fifo(void) {
+    prox_sensor_write_reg(0x04, 0);
+    prox_sensor_write_reg(0x05, 0);
+    prox_sensor_write_reg(0x06, 0);
+}
+// Enable roll over if FIFO over flows
+static void prox_sensor_fifo_rollover_enable(void) {
+    prox_sensor_mask_reg(0x08, 0xEF, 0x10);
+}
+
+// Disable roll over if FIFO over flows
+static void prox_sensor_fifo_rollover_disable(void) {
+    prox_sensor_mask_reg(0x08, 0xEF, 0x00);
+}
+
+static void prox_sensor_enable_slot(uint8_t slotNumber, uint8_t device) {
+    static const uint8_t MAX30105_MULTILEDCONFIG1 = 0x11;
+    static const uint8_t MAX30105_MULTILEDCONFIG2 = 0x12;
+    static const uint8_t MAX30105_SLOT1_MASK = 0xF8;
+    static const uint8_t MAX30105_SLOT2_MASK = 0x8F;
+    static const uint8_t MAX30105_SLOT3_MASK = 0xF8;
+    static const uint8_t MAX30105_SLOT4_MASK = 0x8F;
+    //uint8_t originalContents;
+
+    switch (slotNumber) {
+        case (1):
+            prox_sensor_mask_reg(MAX30105_MULTILEDCONFIG1, MAX30105_SLOT1_MASK,
+                                 device);
+            break;
+        case (2):
+            prox_sensor_mask_reg(MAX30105_MULTILEDCONFIG1, MAX30105_SLOT2_MASK,
+                                 device << 4);
+            break;
+        case (3):
+            prox_sensor_mask_reg(MAX30105_MULTILEDCONFIG2, MAX30105_SLOT3_MASK,
+                                 device);
+            break;
+        case (4):
+            prox_sensor_mask_reg(MAX30105_MULTILEDCONFIG2, MAX30105_SLOT4_MASK,
+                                 device << 4);
+            break;
+        default:
+            // Shouldn't be here!
+            break;
+    }
+}
+// Polls the sensor for new data
+// Call regularly
+// If new data is available, it updates the head and tail in the main struct
+// Returns number of new samples obtained
+static uint16_t prox_sensor_update_impl(void) {
+    // Read register FIDO_DATA in (3-uint8_t * number of active LED) chunks
+    // Until FIFO_RD_PTR = FIFO_WR_PTR
+    uint8_t readPointer = prox_sensor_read_pointer();
+    uint8_t writePointer = prox_sensor_write_pointer();
+    //printf("read: %d, write: %d\n",readPointer,writePointer);
+    int numberOfSamples = 0;
+
+    // Do we have new data?
+    if (readPointer != writePointer) {
+        //puts("new data");
+        // Calculate the number of readings we need to get from sensor
+        numberOfSamples = writePointer - readPointer;
+        if (numberOfSamples < 0) numberOfSamples += 32;  // Wrap condition
+
+        // We now have the number of readings, now calc bytes to read
+        // For this example we are just doing Red and IR (3 bytes each)
+        int bytesLeftToRead = numberOfSamples * proc_sensor_active_leds * 3;
+
+        // Get ready to read a burst of data from the FIFO register
+        uint8_t tmp = 0x07;
+        prox_sensor_write(&tmp, 1);
+        static uint8_t block[64];
+        // We may need to read as many as 288 bytes so we read in blocks no
+        // larger than I2C_BUFFER_LENGTH I2C_BUFFER_LENGTH changes based on the
+        // platform. 64 bytes for SAMD21, 32 bytes for Uno. Wire.requestFrom()
+        // is limited to BUFFER_LENGTH which is 32 on the Uno
+        //printf("bytes to fetch: %d\n",bytesLeftToRead);
+        while (bytesLeftToRead > 0) {
+            int toGet = bytesLeftToRead;
+            if (toGet > 64) {
+                // If toGet is 32 this is bad because we read 6 bytes (Red+IR *
+                // 3 = 6) at a time 32 % 6 = 2 left over. We don't want to
+                // request 32 bytes, we want to request 30. 32 % 9
+                // (Red+IR+GREEN) = 5 left over. We want to request 27.
+
+                toGet = 64 - (64 % (proc_sensor_active_leds *
+                                    3));  // Trim toGet to be a multiple of
+                                          // the samples we need to read
+            }
+
+            bytesLeftToRead -= toGet;
+
+            // Request toGet number of bytes from sensor
+            prox_sensor_read(block, toGet);
+            while (toGet > 0) {
+                prox_sensor_data
+                    .head++;  // Advance the head of the storage struct
+                prox_sensor_data.head %= 4;  // Wrap condition
+
+                uint8_t temp[sizeof(uint32_t)];  // Array of 4 bytes that we
+                                                 // will convert into long
+                uint32_t tempLong;
+                uint8_t burst[3];
+                // Burst read three bytes - RED
+                prox_sensor_read(burst, 3);
+                temp[3] = 0;
+                temp[2] = burst[0];
+                temp[1] = burst[1];
+                temp[0] = burst[2];
+
+                // Convert array to long
+                memcpy(&tempLong, temp, sizeof(tempLong));
+
+                tempLong &= 0x3FFFF;  // Zero out all but 18 bits
+
+                prox_sensor_data.red[prox_sensor_data.head] =
+                    tempLong;  // Store this reading into the sense array
+
+                if (proc_sensor_active_leds > 1) {
+                    // Burst read three more bytes - IR
+                    prox_sensor_read(burst, 3);
+                    temp[3] = 0;
+                    temp[2] = burst[0];
+                    temp[1] = burst[1];
+                    temp[0] = burst[2];
+
+                    // Convert array to long
+                    memcpy(&tempLong, temp, sizeof(tempLong));
+
+                    tempLong &= 0x3FFFF;  // Zero out all but 18 bits
+
+                    prox_sensor_data.IR[prox_sensor_data.head] = tempLong;
+                }
+
+                if (proc_sensor_active_leds > 2) {
+                    // Burst read three more bytes - Green
+                    prox_sensor_read(burst, 3);
+                    temp[3] = 0;
+                    temp[2] = burst[0];
+                    temp[1] = burst[1];
+                    temp[0] = burst[2];
+
+                    // Convert array to long
+                    memcpy(&tempLong, temp, sizeof(tempLong));
+
+                    tempLong &= 0x3FFFF;  // Zero out all but 18 bits
+
+                    prox_sensor_data.green[prox_sensor_data.head] = tempLong;
+                }
+
+                toGet -= proc_sensor_active_leds * 3;
+            }
+
+        }  // End while (bytesLeftToRead > 0)
+
+    }  // End readPtr != writePtr
+    return (numberOfSamples);
+}
+static int prox_sensor_update_timeout(uint32_t maxTimeToCheck) {
+    uint32_t markTime = pdTICKS_TO_MS(xTaskGetTickCount());
+
+    while (1) {
+        if (maxTimeToCheck > 0 &&
+            (pdTICKS_TO_MS(xTaskGetTickCount()) - markTime > maxTimeToCheck))
+            return (0);
+
+        if (prox_sensor_update_impl() == 1)  // We found new data!
+            return (1);
+
+        vTaskDelay(1);
+    }
+}
+
+void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
+                           uint8_t mode, uint8_t sampleRate, uint8_t pulseWidth,
+                           uint8_t adcRange) {
+    
+    //prox_sensor_soft_reset();
+    // FIFO Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    // The chip will average multiple samples of same type together if you wish
+    prox_sensor_fifo_average(sampleAverage);  // No averaging per FIFO record
+
+    // setFIFOAlmostFull(2); //Set to 30 samples to trigger an 'Almost Full'
+    // interrupt
+    prox_sensor_fifo_rollover_enable();  // Allow FIFO to wrap/roll over
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Mode Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    prox_sensor_led_mode(/*mode*/PROX_SENS_MODE_MULTILED);  // Watch all three LED channels
+    proc_sensor_active_leds =
+        3;  // Used to control how many bytes to read from FIFO buffer
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Particle Sensing Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    proc_sensor_adc_range(adcRange);  // 7.81pA per LSB
+
+    prox_sensor_sample_rate(sampleRate);  // Take 50 samples per second
+
+    // The longer the pulse width the longer range of detection you'll have
+    // At 69us and 0.4mA it's about 2 inches
+    // At 411us and 0.4mA it's about 6 inches
+    prox_sensor_pulse_width(pulseWidth);  // Page 26, Gets us 15 bit resolution
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // LED Pulse Amplitude Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    // Default is 0x1F which gets us 6.4mA
+    // powerLevel = 0x02, 0.4mA - Presence detection of ~4 inch
+    // powerLevel = 0x1F, 6.4mA - Presence detection of ~8 inch
+    // powerLevel = 0x7F, 25.4mA - Presence detection of ~8 inch
+    // powerLevel = 0xFF, 50.0mA - Presence detection of ~12 inch
+
+    prox_sensor_pulse_amp_red(powerLevel);
+    prox_sensor_pulse_amp_ir(powerLevel);
+    prox_sensor_pulse_amp_green(powerLevel);
+    prox_sensor_pulse_amp_prox(powerLevel);
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Multi-LED Mode Configuration, Enable the reading of the three LEDs
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    prox_sensor_enable_slot(1, PROX_SENS_SLOT_RED_LED);
+    //++proc_sensor_active_leds;
+    if (mode == PROX_SENS_MODE_REDIRONLY || mode == PROX_SENS_MODE_MULTILED) {
+        prox_sensor_enable_slot(2, PROX_SENS_SLOT_IR_LED);
+        //++proc_sensor_active_leds;
+    }
+    if (mode == PROX_SENS_MODE_MULTILED) {
+        prox_sensor_enable_slot(3, PROX_SENS_SLOT_GREEN_LED);
+        //++proc_sensor_active_leds;
+    }
+    // prox_sensor_enable_slot(1, SLOT_RED_PILOT);
+    // prox_sensor_enable_slot(2, SLOT_IR_PILOT);
+    // prox_sensor_enable_slot(3, SLOT_GREEN_PILOT);
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    prox_sensor_clear_fifo();  // Reset the FIFO before we begin checking the
+                               // sensor
+}
+
+int prox_sensor_read_raw(uint32_t* out_red, uint32_t* out_ir,
+                         uint32_t* out_green, uint32_t timeout) {
+    if (!prox_sensor_initialized) {
+        return 0;
+    }
+    if (!prox_sensor_update_timeout(timeout)) return 0;
+    if (out_red) {
+        *out_red = prox_sensor_data.red[prox_sensor_data.head];
+    }
+    if (out_ir) {
+        *out_ir = prox_sensor_data.IR[prox_sensor_data.head];
+    }
+    if (out_green) {
+        *out_green = prox_sensor_data.green[prox_sensor_data.head];
+    }
+    return 1;
+}
+
+static uint8_t prox_sensor_part_id(void) {
+    uint8_t result;
+    prox_sensor_read_reg(0xFF, &result,1);
+    return result;
+}
+
+static uint8_t prox_sensor_revision_id(void) {
+    uint8_t result;
+    prox_sensor_read_reg(0xFE, &result,1);
+    return result;
+}
+
+void prox_sensor_initialize(void) {
+    if (prox_sensor_initialized) {
+        return;
+    }
+    i2c_initialize();
+    if(prox_sensor_part_id()!=0x15) {
+        ESP_ERROR_CHECK (ESP_ERR_INVALID_RESPONSE);
+    }
+    prox_sensor_initialized=true;
+}
+void prox_sensor_deinitialize(void) {
+    if (!prox_sensor_initialized) {
+        return;
+    }
+}
+
+void prox_sensor_pulse_amp_threshold(int16_t red, int16_t ir, int16_t green, int16_t prox, int16_t thresh) {
+    if(!prox_sensor_initialized) {
+        return;
+    }
+    if(red>=0&&red<=0xFF) {
+        prox_sensor_write_reg(0x0C,red);
+    }
+    if(ir>=0&&ir<=0xFF) {
+        prox_sensor_write_reg(0x0D,ir);
+    }
+    if(green>=0&&green<=0xFF) {
+        prox_sensor_write_reg(0x0E,green);
+    }
+    if(prox>=0&&prox<=0xFF) {
+        prox_sensor_write_reg(0x10,prox);
+    }
+    if(thresh>=0&&thresh<=0xFF) {
+        prox_sensor_write_reg(0x30,thresh);
+    }
 }
