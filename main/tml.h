@@ -110,6 +110,11 @@ typedef struct tml_message
 	struct tml_message* next;
 } tml_message;
 
+struct tml_allocator {
+    void*(*alloc)(size_t size);
+    void*(*realloc)(void* ptr, size_t size);
+    void(*free)(void* ptr);
+};
 // The load functions will return a pointer to a struct tml_message.
 // Normally the linked list gets traversed by following the next pointers.
 // Make sure to keep the pointer to the first message to free the memory.
@@ -118,11 +123,11 @@ typedef struct tml_message
 
 #ifndef TML_NO_STDIO
 // Directly load a MIDI file from a .mid file path
-TMLDEF tml_message* tml_load_filename(const char* filename);
+TMLDEF tml_message* tml_load_filename(const char* filename,struct tml_allocator* alloc);
 #endif
 
 // Load a MIDI file from a block of memory
-TMLDEF tml_message* tml_load_memory(const void* buffer, int size);
+TMLDEF tml_message* tml_load_memory(const void* buffer, int size,struct tml_allocator* alloc);
 
 // Get infos about this loaded MIDI file, returns the note count
 // NULL can be passed for any output value pointer if not needed.
@@ -138,7 +143,7 @@ TMLDEF int tml_get_info(tml_message* first_message, int* used_channels, int* use
 TMLDEF int tml_get_tempo_value(tml_message* set_tempo_message);
 
 // Free all the memory of the linked message list (can also call free() manually)
-TMLDEF void tml_free(tml_message* f);
+TMLDEF void tml_free(tml_message* f,struct tml_allocator* alloc);
 
 // Stream structure for the generic loading
 struct tml_stream
@@ -151,11 +156,11 @@ struct tml_stream
 };
 
 // Generic Midi loading method using the stream structure above
-TMLDEF tml_message* tml_load(struct tml_stream* stream);
+TMLDEF tml_message* tml_load(struct tml_stream* stream,struct tml_allocator* alloc);
 
 // If this library is used together with TinySoundFont, tsf_stream (equivalent to tml_stream) can also be used
 struct tsf_stream;
-TMLDEF tml_message* tml_load_tsf_stream(struct tsf_stream* stream);
+TMLDEF tml_message* tml_load_tsf_stream(struct tsf_stream* stream,struct tml_allocator* alloc);
 
 #ifdef __cplusplus
 }
@@ -169,9 +174,9 @@ TMLDEF tml_message* tml_load_tsf_stream(struct tsf_stream* stream);
 
 #if !defined(TML_MALLOC) || !defined(TML_FREE) || !defined(TML_REALLOC)
 #  include <stdlib.h>
-#  define TML_MALLOC  malloc
-#  define TML_FREE    free
-#  define TML_REALLOC realloc
+#  define TML_MALLOC(x,s)  s->alloc(x)
+#  define TML_FREE(x,s)    s->free(x)
+#  define TML_REALLOC(x,y,s) s->realloc(x,y)
 #endif
 
 #if !defined(TML_MEMCPY)
@@ -207,7 +212,7 @@ extern "C" {
 
 #ifndef TML_NO_STDIO
 static int tml_stream_stdio_read(FILE* f, void* ptr, unsigned int size) { return (int)fread(ptr, 1, size, f); }
-TMLDEF tml_message* tml_load_filename(const char* filename)
+TMLDEF tml_message* tml_load_filename(const char* filename,struct tml_allocator* alloc)
 {
 	struct tml_message* res;
 	struct tml_stream stream = { TML_NULL, (int(*)(void*,void*,unsigned int))&tml_stream_stdio_read };
@@ -218,7 +223,7 @@ TMLDEF tml_message* tml_load_filename(const char* filename)
 	#endif
 	if (!f) { TML_ERROR("File not found"); return 0; }
 	stream.data = f;
-	res = tml_load(&stream);
+	res = tml_load(&stream,alloc);
 	fclose(f);
 	return res;
 }
@@ -226,14 +231,14 @@ TMLDEF tml_message* tml_load_filename(const char* filename)
 
 struct tml_stream_memory { const char* buffer; unsigned int total, pos; };
 static int tml_stream_memory_read(struct tml_stream_memory* m, void* ptr, unsigned int size) { if (size > m->total - m->pos) size = m->total - m->pos; TML_MEMCPY(ptr, m->buffer+m->pos, size); m->pos += size; return size; }
-TMLDEF struct tml_message* tml_load_memory(const void* buffer, int size)
+TMLDEF struct tml_message* tml_load_memory(const void* buffer, int size, struct tml_allocator* alloc)
 {
 	struct tml_stream stream = { TML_NULL, (int(*)(void*,void*,unsigned int))&tml_stream_memory_read };
 	struct tml_stream_memory f = { 0, 0, 0 };
 	f.buffer = (const char*)buffer;
 	f.total = size;
 	stream.data = &f;
-	return tml_load(&stream);
+	return tml_load(&stream,alloc);
 }
 
 struct tml_track
@@ -281,7 +286,7 @@ static int tml_readvariablelength(struct tml_parser* p)
 	TML_WARN("Invalid variable length byte count"); return -1;
 }
 
-static int tml_parsemessage(tml_message** f, struct tml_parser* p)
+static int tml_parsemessage(tml_message** f, struct tml_parser* p, struct tml_allocator* alloc)
 {
 	int deltatime = tml_readvariablelength(p), status = tml_readbyte(p);
 	tml_message* evt;
@@ -301,7 +306,7 @@ static int tml_parsemessage(tml_message** f, struct tml_parser* p)
 	{
 		//start allocated memory size of message array at 64, double each time until 8192, then add 1024 entries until done
 		p->message_array_size += (!p->message_array_size ? 64 : (p->message_array_size > 4096 ? 1024 : p->message_array_size));
-		*f = (tml_message*)TML_REALLOC(*f, p->message_array_size * sizeof(tml_message));
+		*f = (tml_message*)TML_REALLOC(*f, p->message_array_size * sizeof(tml_message),alloc);
 		if (!*f) { TML_ERROR("Out of memory"); return -1; }
 	}
 	evt = *f + p->message_count;
@@ -381,8 +386,15 @@ static int tml_parsemessage(tml_message** f, struct tml_parser* p)
 	return evt->type;
 }
 
-TMLDEF tml_message* tml_load(struct tml_stream* stream)
+TMLDEF tml_message* tml_load(struct tml_stream* stream, struct tml_allocator* allocator)
 {
+    struct tml_allocator al;
+    if(allocator==NULL) {
+        al.alloc = malloc;
+        al.realloc = realloc;
+        al.free=free;
+        allocator = &al;
+    }
 	int num_tracks, division, trackbufsize = 0;
 	unsigned char midi_header[14], *trackbuf = TML_NULL;
 	struct tml_message* messages = TML_NULL;
@@ -399,7 +411,7 @@ TMLDEF tml_message* tml_load(struct tml_stream* stream)
 	if (num_tracks <= 0 && division <= 0) { TML_ERROR("Doesn't look like a MIDI file: invalid track or division values"); return messages; }
 
 	// Allocate temporary tracks array for parsing
-	tracks = (struct tml_track*)TML_MALLOC(sizeof(struct tml_track) * num_tracks);
+	tracks = (struct tml_track*)TML_MALLOC(sizeof(struct tml_track) * num_tracks,allocator);
 	tracksEnd = &tracks[num_tracks];
 	for (t = tracks; t != tracksEnd; t++) t->Idx = t->End = t->Ticks = 0;
 
@@ -415,19 +427,19 @@ TMLDEF tml_message* tml_load(struct tml_stream* stream)
 		// Get size of track data and read into buffer (allocate bigger buffer if needed)
 		track_length = track_header[7] | (track_header[6] << 8) | (track_header[5] << 16) | (track_header[4] << 24);
 		if (track_length < 0) { TML_WARN("Invalid MTrk header"); break; }
-		if (trackbufsize < track_length) { TML_FREE(trackbuf); trackbuf = (unsigned char*)TML_MALLOC(trackbufsize = track_length); }
+		if (trackbufsize < track_length) { TML_FREE(trackbuf,allocator); trackbuf = (unsigned char*)TML_MALLOC(trackbufsize = track_length,allocator); }
 		if (stream->read(stream->data, trackbuf, track_length) != track_length) { TML_WARN("Unexpected end of file"); break; }
 
 		t->Idx = p.message_count;
 		for (p.buf_end = (p.buf = trackbuf) + track_length; p.buf != p.buf_end;)
 		{
-			int type = tml_parsemessage(&messages, &p);
+			int type = tml_parsemessage(&messages, &p,allocator);
 			if (type == TML_EOT || type < 0) break; //file end or illegal data encountered
 		}
 		if (p.buf != p.buf_end) { TML_WARN( "Track length did not match data length"); }
 		t->End = p.message_count;
 	}
-	TML_FREE(trackbuf);
+	TML_FREE(trackbuf,allocator);
 
 	// Change message time signature from delta ticks to actual msec values and link messages ordered by time
 	if (p.message_count)
@@ -472,20 +484,20 @@ TMLDEF tml_message* tml_load(struct tml_stream* stream)
 		if (PrevMessage) PrevMessage->next = TML_NULL;
 		else p.message_count = 0;
 	}
-	TML_FREE(tracks);
+	TML_FREE(tracks,allocator);
 
 	if (p.message_count == 0)
 	{
-		TML_FREE(messages);
+		TML_FREE(messages,allocator);
 		messages = TML_NULL;
 	}
 
 	return messages;
 }
 
-TMLDEF tml_message* tml_load_tsf_stream(struct tsf_stream* stream)
+TMLDEF tml_message* tml_load_tsf_stream(struct tsf_stream* stream, struct tml_allocator* alloc)
 {
-	return tml_load((struct tml_stream*)stream);
+	return tml_load((struct tml_stream*)stream,alloc);
 }
 
 TMLDEF int tml_get_info(tml_message* Msg, int* out_used_channels, int* out_used_programs, int* out_total_notes, unsigned int* out_time_first_note, unsigned int* out_time_length)
@@ -519,9 +531,9 @@ TMLDEF int tml_get_tempo_value(tml_message* msg)
 	return ((Tempo[0]<<16)|(Tempo[1]<<8)|Tempo[2]);
 }
 
-TMLDEF void tml_free(tml_message* f)
+TMLDEF void tml_free(tml_message* f, struct tml_allocator* alloc)
 {
-	TML_FREE(f);
+	TML_FREE(f,alloc);
 }
 
 #ifdef __cplusplus

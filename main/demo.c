@@ -26,6 +26,7 @@ static uint32_t prox_average; //Average IR at power up
 
 struct tsf_allocator tsf_alloc;
 struct tsf* tsf_handle;
+struct tml_allocator tml_alloc;
 struct tml_message* tml_messages;
 struct tml_message* tml_message_cursor;
 static void* ps_malloc(size_t size) {
@@ -126,7 +127,11 @@ void app_main(void)
             puts("Unable to load soundfont");
             ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
         }
-        tml_messages = tml_load_filename("/sdcard/furelise.mid");
+        tml_alloc.alloc = ps_malloc;
+        tml_alloc.realloc = ps_realloc;
+        tml_alloc.free = free;
+        
+        tml_messages = tml_load_filename("/sdcard/furelise.mid",&tml_alloc);
         if(tml_messages==NULL) {
             puts("Unable to load midi");
             ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);

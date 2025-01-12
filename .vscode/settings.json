@@ -11,6 +11,7 @@
         "spi_master.h": "c",
         "gpio_ll.h": "c",
         "freenove_s3_devkit.h": "c",
-        "i2s.h": "c"
+        "i2s.h": "c",
+        "tml.h": "c"
     }
 }
