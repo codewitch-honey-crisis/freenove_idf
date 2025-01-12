@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_attr.h"
+#include "driver/sdmmc_types.h"
 enum {
     CAM_DEFAULT = 0,
     CAM_ALLOC_FB_PSRAM=(1<<0),
@@ -107,6 +108,23 @@ enum {
     // Default is 6.4mA
     PROX_SENS_AMP_DEFAULT = PROX_SENS_AMP_6_4MA
 };
+enum {
+    SD_FLAGS_DEFAULT = 0,
+    SD_FLAGS_FORMAT_ON_FAIL = 1
+};
+enum {
+    SD_MAX_FILES_DEFAULT = 5
+};
+enum {
+    SD_ALLOC_SIZE_DEFAULT = 0
+};
+enum {
+    SD_FREQ_DEFAULT = 20*1000
+};
+
+#define SD_MOUNT_POINT_DEFAULT "/sdcard"
+
+#define AUDIO_MAX_SAMPLES 1024
 // optionally implemented by user: notify when transfer complete
 extern IRAM_ATTR void lcd_on_flush_complete(void) __attribute__((weak));
 extern void lcd_initialize(size_t max_transfer_size);
@@ -136,7 +154,6 @@ extern int touch_xy(uint16_t* out_x, uint16_t* out_y);
 extern int touch_xy2(uint16_t* out_x, uint16_t* out_y);
 extern void touch_deinitialize(void);
 
-extern const size_t audio_max_samples;
 extern void audio_initialize(int format);
 extern void audio_deinitialize(void);
 extern size_t audio_write_int16(const int16_t* samples, size_t sample_count);
@@ -148,6 +165,8 @@ extern void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage, uin
            uint8_t sampleRate, uint8_t pulseWidth , uint8_t adcRange);
 extern int prox_sensor_read_raw(uint32_t* out_red, uint32_t* out_ir, uint32_t* out_green, uint32_t timeout);
 extern void prox_sensor_pulse_amp_threshold(int16_t red, int16_t ir, int16_t green, int16_t prox,int16_t thresh);
-extern void prox_sensor_configure2(uint8_t powerLevel, uint8_t sampleAverage , uint8_t ledMode ,
-           int sampleRate , int pulseWidth , int adcRange);
+
+extern int sd_initialize(const char* mount_point, size_t max_files, size_t allocation_unit_size, uint32_t freq_khz, int flags);
+extern void sd_deinitialize();
+extern sdmmc_card_t* sd_card();
 #endif // FREENOVE_S3_DEVKIT_H
