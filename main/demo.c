@@ -130,7 +130,6 @@ void app_main(void)
         tml_alloc.alloc = ps_malloc;
         tml_alloc.realloc = ps_realloc;
         tml_alloc.free = free;
-        
         tml_messages = tml_load_filename("/sdcard/furelise.mid",&tml_alloc);
         if(tml_messages==NULL) {
             puts("Unable to load midi");
@@ -226,9 +225,9 @@ void app_main(void)
         } else if(currentDelta<0) {
             currentDelta = 0;
         }
-        float amp =  currentDelta/1000.f;
-        if(ir<prox_average*1.2f) {
-            amp=0;
+        float amp =  currentDelta/2000.f;
+        if(ir<prox_average) {
+            amp=.0125;
         }
         xSemaphoreTake(audio_sync,portMAX_DELAY);
         audio_amplitude = amp;

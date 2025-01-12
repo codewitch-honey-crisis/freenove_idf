@@ -759,7 +759,7 @@ int touch_xy2(uint16_t* out_x, uint16_t* out_y) {
 static uint16_t* audio_out_buffer = NULL;
 static i2s_chan_handle_t audio_handle = NULL;
 
-void audio_initialize(int format) {
+void audio_initialize(audio_format_t format) {
     if (audio_out_buffer != NULL) {
         return;
     }
@@ -1191,16 +1191,15 @@ static int prox_sensor_update_timeout(uint32_t maxTimeToCheck) {
     }
 }
 
-void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
-                           uint8_t mode, uint8_t sampleRate, uint8_t pulseWidth,
-                           uint8_t adcRange) {
+void prox_sensor_configure(prox_sens_amp_t powerLevel, prox_sens_sampleavg_t sampleAverage, prox_sens_mode_t mode ,
+           prox_sens_samplerate_t sampleRate, prox_sens_pulsewidth_t pulseWidth , prox_sens_adcrange_t adcRange) {
     
     //prox_sensor_soft_reset();
     prox_sensor_active_leds = 0;
     // FIFO Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
     // The chip will average multiple samples of same type together if you wish
-    prox_sensor_fifo_average(sampleAverage);  // No averaging per FIFO record
+    prox_sensor_fifo_average((uint8_t)sampleAverage);  // No averaging per FIFO record
 
     // setFIFOAlmostFull(2); //Set to 30 samples to trigger an 'Almost Full'
     // interrupt
@@ -1209,20 +1208,20 @@ void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
 
     // Mode Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-    prox_sensor_led_mode(mode);  // Watch all three LED channels
+    prox_sensor_led_mode((uint8_t)mode);  // Watch all three LED channels
     //prox_sensor_mode = mode;
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
     // Particle Sensing Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-    prox_sensor_adc_range(adcRange);  // 7.81pA per LSB
+    prox_sensor_adc_range((uint8_t)adcRange);  // 7.81pA per LSB
 
-    prox_sensor_sample_rate(sampleRate);  // Take 50 samples per second
+    prox_sensor_sample_rate((uint8_t)sampleRate);  // Take 50 samples per second
 
     // The longer the pulse width the longer range of detection you'll have
     // At 69us and 0.4mA it's about 2 inches
     // At 411us and 0.4mA it's about 6 inches
-    prox_sensor_pulse_width(pulseWidth);  // Page 26, Gets us 15 bit resolution
+    prox_sensor_pulse_width((uint8_t)pulseWidth);  // Page 26, Gets us 15 bit resolution
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
     // LED Pulse Amplitude Configuration
@@ -1233,22 +1232,22 @@ void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
     // powerLevel = 0x7F, 25.4mA - Presence detection of ~8 inch
     // powerLevel = 0xFF, 50.0mA - Presence detection of ~12 inch
 
-    prox_sensor_pulse_amp_red(powerLevel);
-    prox_sensor_pulse_amp_ir(powerLevel);
-    prox_sensor_pulse_amp_green(powerLevel);
-    prox_sensor_pulse_amp_prox(powerLevel);
+    prox_sensor_pulse_amp_red((uint8_t)powerLevel);
+    prox_sensor_pulse_amp_ir((uint8_t)powerLevel);
+    prox_sensor_pulse_amp_green((uint8_t)powerLevel);
+    prox_sensor_pulse_amp_prox((uint8_t)powerLevel);
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
     // Multi-LED Mode Configuration, Enable the reading of the three LEDs
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-    prox_sensor_enable_slot(1, PROX_SENS_SLOT_RED_LED);
+    prox_sensor_enable_slot(1, (uint8_t)PROX_SENS_SLOT_RED_LED);
     ++prox_sensor_active_leds;
     if (mode == PROX_SENS_MODE_REDIRONLY || mode == PROX_SENS_MODE_MULTILED) {
-        prox_sensor_enable_slot(2, PROX_SENS_SLOT_IR_LED);
+        prox_sensor_enable_slot(2, (uint8_t)PROX_SENS_SLOT_IR_LED);
         ++prox_sensor_active_leds;
     }
     if (mode == PROX_SENS_MODE_MULTILED) {
-        prox_sensor_enable_slot(3, PROX_SENS_SLOT_GREEN_LED);
+        prox_sensor_enable_slot(3, (uint8_t)PROX_SENS_SLOT_GREEN_LED);
         ++prox_sensor_active_leds;
     }
     // prox_sensor_enable_slot(1, SLOT_RED_PILOT);
