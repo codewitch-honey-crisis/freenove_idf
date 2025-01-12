@@ -50,7 +50,7 @@ void audio_task(void* arg) {
 			}
             tml_message_cursor = tml_message_cursor->next;
         }
-        tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES, 0);
+        tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES>>1, 0);
         audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,0.0125);
     
     }
@@ -63,7 +63,7 @@ void app_main() {
         puts("Unable to mount SD");
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
     }
-    audio_initialize(AUDIO_11K_MONO);
+    audio_initialize(AUDIO_44_1K_STEREO );
     memset(audio_output_buffer,0,sizeof(float)*AUDIO_MAX_SAMPLES);
     tsf_alloc.alloc = ps_malloc;
     tsf_alloc.realloc = ps_realloc;
@@ -73,7 +73,7 @@ void app_main() {
         puts("Unable to load soundfont");
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
     }
-    tml_messages = tml_load_filename("/sdcard/warm.mid");
+    tml_messages = tml_load_filename("/sdcard/sabo.mid");
     if(tml_messages==NULL) {
         puts("Unable to load midi");
         ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
@@ -82,7 +82,7 @@ void app_main() {
     //Initialize preset on special 10th MIDI channel to use percussion sound bank (128) if available
 	tsf_channel_set_bank_preset(tsf_handle, 9, 128, 0);
 	// Set the SoundFont rendering output mode
-	tsf_set_output(tsf_handle, TSF_MONO, 11025, 0.0f);
+	tsf_set_output(tsf_handle, TSF_STEREO_INTERLEAVED, 44100, 0.0f);
     tsf_set_max_voices(tsf_handle,4);
     TaskHandle_t audio_handle;
     xTaskCreatePinnedToCore(audio_task,"audio_task", 8192,NULL,10,&audio_handle,xTaskGetCoreID(xTaskGetCurrentTaskHandle()));
