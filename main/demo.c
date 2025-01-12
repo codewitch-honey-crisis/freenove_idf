@@ -1,5 +1,3 @@
-// turn off the audio
-#define SILENCE
 #include <stdio.h>
 #include <memory.h>
 #include <math.h>
@@ -18,6 +16,14 @@
 #include "tsf.h"
 #define TML_IMPLEMENTATION
 #include "tml.h"
+
+// 240x240 instead of 96x96
+static const int big_cam =1;
+
+static SemaphoreHandle_t audio_sync=NULL;
+static float audio_amplitude=0;
+static uint32_t prox_average; //Average IR at power up
+
 struct tsf_allocator tsf_alloc;
 struct tsf* tsf_handle;
 struct tml_message* tml_messages;
@@ -61,16 +67,19 @@ void audio_task(void* arg) {
 			}
             tml_message_cursor = tml_message_cursor->next;
         }
+        float amp;
+        xSemaphoreTake(audio_sync,portMAX_DELAY);
+        amp = audio_amplitude;
+        xSemaphoreGive(audio_sync);
+
         tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES>>1, 0);
-        audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,0.05);
+        audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,amp);
         if(tml_message_cursor==NULL) {
             start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
             tml_message_cursor = tml_messages;
         }
     }
-    // tsf_note_off_all(tsf_handle);
-    // audio_deinitialize();
-    // vTaskDelete(NULL);
+
 }
 
 void camera_on_frame();
@@ -105,12 +114,6 @@ static void lcd_clear_screen(uint16_t color) {
     }
 }
 
-static SemaphoreHandle_t audio_sync=NULL;
-static uint32_t prox_average; //Average IR at power up
-
-
-static const bool big_cam =true;
-
 void app_main(void)
 {
     if(sd_initialize("/sdcard",2,16384,SD_FREQ_DEFAULT,SD_FLAGS_DEFAULT)) {    
@@ -137,8 +140,23 @@ void app_main(void)
         sd_deinitialize();
     } else {
         puts("This demo requires a prepared SD card");
-        //ESP_ERROR_CHECK(ESP_ERR_INVALID_STATE);
-        while(1) vTaskDelay(1);
+        ESP_ERROR_CHECK(ESP_ERR_INVALID_STATE);
+    }
+    audio_sync = xSemaphoreCreateMutex();
+    if(audio_sync==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    audio_output_buffer=(float*)malloc(AUDIO_MAX_SAMPLES*sizeof(float));
+    if(audio_output_buffer==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    memset(audio_output_buffer,0,AUDIO_MAX_SAMPLES*sizeof(float));
+    audio_initialize(AUDIO_44_1K_STEREO);
+    TaskHandle_t audio_handle;
+    xTaskCreatePinnedToCore(audio_task,"audio_task",8192,NULL,10,&audio_handle,1-xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
+    if(audio_handle==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+        while(1);
     }
     static const size_t max_size =big_cam? 240*32*2:96*96*2;
     lcd_initialize(max_size);
@@ -152,7 +170,7 @@ void app_main(void)
     uint32_t total_ms = 0;
     int frames = 0;
     uint32_t ts_ms = pdTICKS_TO_MS(xTaskGetTickCount());
-    camera_initialize(big_cam?CAM_ALLOC_CAM_PSRAM|CAM_ALLOC_FB_PSRAM:CAM_FRAME_SIZE_96X96);
+    camera_initialize(CAM_ALLOC_CAM_PSRAM|CAM_ALLOC_FB_PSRAM);
     lcd_clear_screen(0);
     camera_rotation(3);
     lcd_rotation(3);
@@ -161,8 +179,6 @@ void app_main(void)
     //Setup to sense up to 18 inches, max LED brightness
     prox_sensor_initialize();
     prox_sensor_configure(PROX_SENS_AMP_50MA,PROX_SENS_SAMPLEAVG_4,PROX_SENS_MODE_REDIRONLY,PROX_SENS_SAMPLERATE_400,PROX_SENS_PULSEWIDTH_411, PROX_SENS_ADCRANGE_2048);
-    
-    
     //Take an average of IR readings at power up
     prox_average = 0;
     int avg_div = 0;
@@ -185,24 +201,12 @@ void app_main(void)
         ESP_ERROR_CHECK(ESP_ERR_INVALID_RESPONSE);
     }
     prox_average /= avg_div;
-
-    audio_sync = xSemaphoreCreateMutex();
-    if(audio_sync==NULL) {
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
-    audio_output_buffer=(float*)malloc(AUDIO_MAX_SAMPLES*sizeof(float));
-    if(audio_output_buffer==NULL) {
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
-    }
-    memset(audio_output_buffer,0,AUDIO_MAX_SAMPLES*sizeof(float));
-    audio_initialize(AUDIO_44_1K_STEREO);
-    TaskHandle_t audio_handle;
-    xTaskCreatePinnedToCore(audio_task,"audio_task",8192,NULL,10,&audio_handle,1-xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
     //led_initialize(); // conflicts with touch/i2c
     printf("Free SRAM: %0.2fKB, free PSRAM: %0.2fMB\n",heap_caps_get_free_size(MALLOC_CAP_INTERNAL)/1024.f,heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024.f/1024.f);
     int col = 0;
     uint32_t wdt_ts =  pdTICKS_TO_MS(xTaskGetTickCount());
     while(true) {
+        taskYIELD();
         uint32_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         camera_on_frame();
         uint16_t x,y;
@@ -217,11 +221,14 @@ void app_main(void)
         } else if(currentDelta<0) {
             currentDelta = 0;
         }
-        
-        // xSemaphoreTake(audio_sync,50);
-        // audio_freq = 1000-currentDelta;
-        // xSemaphoreGive(audio_sync);
-
+        float amp =  currentDelta/1000.f;
+        if(ir<prox_average*1.2f) {
+            amp=0;
+        }
+        xSemaphoreTake(audio_sync,portMAX_DELAY);
+        audio_amplitude = amp;
+        xSemaphoreGive(audio_sync);
+        printf("amplitude: %0.2f\n",amp);
         ++frames;
         uint32_t end_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         if(end_ms>wdt_ts+150) {
