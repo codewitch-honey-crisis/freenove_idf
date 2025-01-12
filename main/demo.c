@@ -228,7 +228,6 @@ void app_main(void)
         xSemaphoreTake(audio_sync,portMAX_DELAY);
         audio_amplitude = amp;
         xSemaphoreGive(audio_sync);
-        printf("amplitude: %0.2f\n",amp);
         ++frames;
         uint32_t end_ms = pdTICKS_TO_MS(xTaskGetTickCount());
         if(end_ms>wdt_ts+150) {
