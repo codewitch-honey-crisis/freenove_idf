@@ -20,7 +20,7 @@ static void* ps_realloc(void* ptr,size_t size) {
 static float audio_output_buffer[AUDIO_MAX_SAMPLES];
 void audio_task(void* arg) {
     uint64_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
-    uint64_t wdt_ms = start_ms;
+    // uint64_t wdt_ms = start_ms;
     while(tml_message_cursor) {
         uint64_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
 
