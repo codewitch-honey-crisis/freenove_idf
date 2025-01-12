@@ -1331,7 +1331,7 @@ static sdmmc_card_t *sd_card_handle = NULL;
 static const char* sd_mount_point = NULL;
 int sd_initialize(const char* mount_point, size_t max_files, size_t alloc_unit_size, uint32_t freq, int flags) {
     if(sd_initialized) {
-        return 0;
+        return 1;
     }
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = (flags&SD_FLAGS_FORMAT_ON_FAIL),
@@ -1347,13 +1347,15 @@ int sd_initialize(const char* mount_point, size_t max_files, size_t alloc_unit_s
     slot_config.cmd = SDMMC_CMD;
     slot_config.d0 = SDMMC_D0;
     slot_config.width = 1;
-    
     // assuming the board is built correctly, we don't need this:
     // slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(mount_point, &host, &slot_config, &mount_config, &sd_card_handle);
-    sd_initialized = (ret==ESP_OK);
+    if(ret!=ESP_OK) {
+        return 0;
+    }
     sd_mount_point = mount_point;
-    return sd_initialized;
+    sd_initialized=1;
+    return 1;
 }
 void sd_deinitialize() {
     if(!sd_initialized) {

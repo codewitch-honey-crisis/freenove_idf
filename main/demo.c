@@ -3,12 +3,75 @@
 #include <stdio.h>
 #include <memory.h>
 #include <math.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "esp_task_wdt.h"
 #include "freenove_s3_devkit.h"
+#include "esp_heap_caps.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
+#define TSF_IMPLEMENTATION
+#include "tsf.h"
+#define TML_IMPLEMENTATION
+#include "tml.h"
+struct tsf_allocator tsf_alloc;
+struct tsf* tsf_handle;
+struct tml_message* tml_messages;
+struct tml_message* tml_message_cursor;
+static void* ps_malloc(size_t size) {
+    return heap_caps_malloc(size,MALLOC_CAP_SPIRAM);
+}
+static void* ps_realloc(void* ptr,size_t size) {
+    return heap_caps_realloc(ptr, size,MALLOC_CAP_SPIRAM);
+}
+static float* audio_output_buffer;
+void audio_task(void* arg) {
+    uint64_t start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+    uint64_t wdt_ms = start_ms;
+    while(true) {
+        uint64_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
 
+        while(tml_message_cursor && tml_message_cursor->time<=(ms-start_ms)) {
+            if(ms>wdt_ms+150) {
+                wdt_ms = ms;
+                vTaskDelay(pdMS_TO_TICKS(1));
+                ++ms;
+            }
+            switch (tml_message_cursor->type)
+			{
+				case TML_PROGRAM_CHANGE: //channel program (preset) change (special handling for 10th MIDI channel with drums)
+					tsf_channel_set_presetnumber(tsf_handle, tml_message_cursor->channel, tml_message_cursor->program, (tml_message_cursor->channel == 9));
+					break;
+				case TML_NOTE_ON: //play a note
+					tsf_channel_note_on(tsf_handle, tml_message_cursor->channel, tml_message_cursor->key, tml_message_cursor->velocity / 127.0f);
+					break;
+				case TML_NOTE_OFF: //stop a note
+					tsf_channel_note_off(tsf_handle, tml_message_cursor->channel, tml_message_cursor->key);
+					break;
+				case TML_PITCH_BEND: //pitch wheel modification
+					tsf_channel_set_pitchwheel(tsf_handle, tml_message_cursor->channel, tml_message_cursor->pitch_bend);
+					break;
+				case TML_CONTROL_CHANGE: //MIDI controller messages
+					tsf_channel_midi_control(tsf_handle, tml_message_cursor->channel, tml_message_cursor->control, tml_message_cursor->control_value);
+					break;
+			}
+            tml_message_cursor = tml_message_cursor->next;
+        }
+        tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES>>1, 0);
+        audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,0.05);
+        if(tml_message_cursor==NULL) {
+            start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+            tml_message_cursor = tml_messages;
+        }
+    }
+    // tsf_note_off_all(tsf_handle);
+    // audio_deinitialize();
+    // vTaskDelete(NULL);
+}
 
 void camera_on_frame();
 
@@ -43,78 +106,40 @@ static void lcd_clear_screen(uint16_t color) {
 }
 
 static SemaphoreHandle_t audio_sync=NULL;
-static float audio_freq = 1000;
 static uint32_t prox_average; //Average IR at power up
 
 
-void next_waveform(int shape,float frequency, float amplitude, float* phase,float* samples, size_t sample_count) {
-    static const float pi = 3.141592653589793238462643f; 
-    const float delta = (pi*2.f)*frequency/44100.f;
-    float f;
-    float* out = samples;
-    float p = *phase;
-    for(int i = 0;i<sample_count;++i) {
-        switch(shape) {
-            case 1: // square:
-                f=(p>pi)*2-1.f;
-                break;
-            case 2: // triangle:
-                f=(p-pi)/pi;
-                break;
-            case 3: // sawtooth:
-                f=(p-pi)/pi;
-                break;
-            default: // 0 = sine:
-                f=sinf(p);
-                break;
-            
-        }
-        f*=amplitude;
-        if(f<-1) f=-1;
-        if(f>1) f=1;
-        *(out++) = f;
-        *(out++) = f;
-        p+=delta;
-        if(p>(pi*2.f)) {
-            p-=(pi*2.f);
-        }
-        *phase = p;
-    }
-}
 static const bool big_cam =true;
 
-static void audio_task(void* arg) {
-    uint32_t wdt_ts = 0;    
-#ifndef SILENCE
-    uint32_t aud_ts = 0;
-    static float samples[1024]={};
-    float phase = 0;
-    float freq = 100.f;
-    float freq_delta = 20.f;
-#endif
-    while(1) {
-        uint32_t ms = pdTICKS_TO_MS(xTaskGetTickCount());
-        if(ms>=wdt_ts+200) {
-            wdt_ts=ms;
-            vTaskDelay(1);
-        }
-#ifndef SILENCE
-        if(ms>=aud_ts+10) {
-            
-            aud_ts = ms;
-            float f;
-            xSemaphoreTake(audio_sync,portMAX_DELAY);
-            f=audio_freq;
-            xSemaphoreGive(audio_sync);
-
-            next_waveform(0,f,.007f,&phase,samples,audio_max_samples>>1);
-            audio_write_float(samples,audio_max_samples,1);
-        }
-#endif
-    }
-}
 void app_main(void)
 {
+    if(sd_initialize("/sdcard",2,16384,SD_FREQ_DEFAULT,SD_FLAGS_DEFAULT)) {    
+        sdmmc_card_print_info(stdout,sd_card());
+        tsf_alloc.alloc = ps_malloc;
+        tsf_alloc.realloc = ps_realloc;
+        tsf_alloc.free = free;
+        tsf_handle = tsf_load_filename("/sdcard/1mgm.sf2",&tsf_alloc);
+        if(tsf_handle==NULL) {
+            puts("Unable to load soundfont");
+            ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
+        }
+        tml_messages = tml_load_filename("/sdcard/furelise.mid");
+        if(tml_messages==NULL) {
+            puts("Unable to load midi");
+            ESP_ERROR_CHECK(ESP_ERR_NOT_FOUND);
+        }
+        tml_message_cursor = tml_messages;
+        //Initialize preset on special 10th MIDI channel to use percussion sound bank (128) if available
+        tsf_channel_set_bank_preset(tsf_handle, 9, 128, 0);
+        // Set the SoundFont rendering output mode
+        tsf_set_output(tsf_handle, TSF_STEREO_INTERLEAVED, 44100, 0.0f);
+        tsf_set_max_voices(tsf_handle,4);
+        sd_deinitialize();
+    } else {
+        puts("This demo requires a prepared SD card");
+        //ESP_ERROR_CHECK(ESP_ERR_INVALID_STATE);
+        while(1) vTaskDelay(1);
+    }
     static const size_t max_size =big_cam? 240*32*2:96*96*2;
     lcd_initialize(max_size);
     lcd_transfer_buffer1 = heap_caps_malloc(max_size,MALLOC_CAP_DMA);
@@ -136,11 +161,8 @@ void app_main(void)
     //Setup to sense up to 18 inches, max LED brightness
     prox_sensor_initialize();
     prox_sensor_configure(PROX_SENS_AMP_50MA,PROX_SENS_SAMPLEAVG_4,PROX_SENS_MODE_REDIRONLY,PROX_SENS_SAMPLERATE_400,PROX_SENS_PULSEWIDTH_411, PROX_SENS_ADCRANGE_2048);
-    if(0!=sd_initialize(SD_MOUNT_POINT_DEFAULT,SD_MAX_FILES_DEFAULT,SD_ALLOC_SIZE_DEFAULT,SD_FREQ_DEFAULT,SD_FLAGS_DEFAULT)) {
-        
-        sdmmc_card_print_info(stdout,sd_card());
-        sd_deinitialize();
-    }
+    
+    
     //Take an average of IR readings at power up
     prox_average = 0;
     int avg_div = 0;
@@ -165,6 +187,14 @@ void app_main(void)
     prox_average /= avg_div;
 
     audio_sync = xSemaphoreCreateMutex();
+    if(audio_sync==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    audio_output_buffer=(float*)malloc(AUDIO_MAX_SAMPLES*sizeof(float));
+    if(audio_output_buffer==NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    memset(audio_output_buffer,0,AUDIO_MAX_SAMPLES*sizeof(float));
     audio_initialize(AUDIO_44_1K_STEREO);
     TaskHandle_t audio_handle;
     xTaskCreatePinnedToCore(audio_task,"audio_task",8192,NULL,10,&audio_handle,1-xTaskGetAffinity(xTaskGetCurrentTaskHandle()));
@@ -188,9 +218,9 @@ void app_main(void)
             currentDelta = 0;
         }
         
-        xSemaphoreTake(audio_sync,50);
-        audio_freq = 1000-currentDelta;
-        xSemaphoreGive(audio_sync);
+        // xSemaphoreTake(audio_sync,50);
+        // audio_freq = 1000-currentDelta;
+        // xSemaphoreGive(audio_sync);
 
         ++frames;
         uint32_t end_ms = pdTICKS_TO_MS(xTaskGetTickCount());
