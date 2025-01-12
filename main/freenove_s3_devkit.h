@@ -148,5 +148,6 @@ extern void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage, uin
            uint8_t sampleRate, uint8_t pulseWidth , uint8_t adcRange);
 extern int prox_sensor_read_raw(uint32_t* out_red, uint32_t* out_ir, uint32_t* out_green, uint32_t timeout);
 extern void prox_sensor_pulse_amp_threshold(int16_t red, int16_t ir, int16_t green, int16_t prox,int16_t thresh);
-
+extern void prox_sensor_configure2(uint8_t powerLevel, uint8_t sampleAverage , uint8_t ledMode ,
+           int sampleRate , int pulseWidth , int adcRange);
 #endif // FREENOVE_S3_DEVKIT_H

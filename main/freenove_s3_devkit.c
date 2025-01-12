@@ -862,7 +862,6 @@ size_t audio_write_float(const float* samples, size_t sample_count, float vel) {
     return result;
 }
 static int prox_sensor_initialized = 0;
-static uint8_t proc_sensor_active_leds = 0;
 typedef struct {
     uint32_t red[4];
     uint32_t IR[4];
@@ -873,6 +872,7 @@ typedef struct {
                        // sensor
 
 static prox_sensor_info_t prox_sensor_data;
+static uint8_t prox_sensor_active_leds;
 //
 static esp_err_t prox_sensor_read(uint8_t* data_rd, size_t size) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -889,7 +889,9 @@ static esp_err_t prox_sensor_write(uint8_t* data_wr, size_t size) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (0x57 << 1) | I2C_MASTER_WRITE, I2C_MASTER_NACK);
-    i2c_master_write(cmd, data_wr, size, I2C_MASTER_ACK);
+    while(size--) {
+        i2c_master_write_byte(cmd,*(data_wr++), I2C_MASTER_ACK);
+    }
     i2c_master_stop(cmd);
     esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(cmd);
@@ -902,10 +904,14 @@ static void prox_sensor_read_reg(uint8_t reg_addr, uint8_t* data_reg,
 }
 
 static void prox_sensor_write_reg(uint8_t command, uint8_t reg) {
-    uint8_t data[2];
-    data[0] = reg;
-    data[1] = command;
-    ESP_ERROR_CHECK(prox_sensor_write(data, 2));
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x57 << 1) | I2C_MASTER_WRITE, I2C_MASTER_NACK);
+    i2c_master_write_byte(cmd, command, I2C_MASTER_ACK);
+    i2c_master_write_byte(cmd, reg, I2C_MASTER_ACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
 }
 // Given a register, read it, mask it, and then set the thing
 static void prox_sensor_mask_reg(uint8_t reg, uint8_t mask, uint8_t thing) {
@@ -951,7 +957,7 @@ static void prox_sensor_led_mode(uint8_t mode) {
     prox_sensor_mask_reg(0x09, 0xF8, mode);
 }
 
-static void proc_sensor_adc_range(uint8_t adcRange) {
+static void prox_sensor_adc_range(uint8_t adcRange) {
     // adcRange: one of MAX30105_ADCRANGE_2048, _4096, _8192, _16384
     prox_sensor_mask_reg(0x0A, 0x9F, adcRange);
 }
@@ -1059,11 +1065,20 @@ static uint16_t prox_sensor_update_impl(void) {
 
         // We now have the number of readings, now calc bytes to read
         // For this example we are just doing Red and IR (3 bytes each)
-        int bytesLeftToRead = numberOfSamples * proc_sensor_active_leds * 3;
+
+        int bytesLeftToRead = numberOfSamples * prox_sensor_active_leds * 3;
 
         // Get ready to read a burst of data from the FIFO register
         uint8_t tmp = 0x07;
-        prox_sensor_write(&tmp, 1);
+        //prox_sensor_write(&tmp, 1);
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (0x57 << 1) | I2C_MASTER_WRITE, I2C_MASTER_NACK);
+        i2c_master_write_byte(cmd, tmp, I2C_MASTER_ACK);
+        i2c_master_stop(cmd);
+        ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(1000)));
+        i2c_cmd_link_delete(cmd);
+
         static uint8_t block[64];
         // We may need to read as many as 288 bytes so we read in blocks no
         // larger than I2C_BUFFER_LENGTH I2C_BUFFER_LENGTH changes based on the
@@ -1078,7 +1093,7 @@ static uint16_t prox_sensor_update_impl(void) {
                 // request 32 bytes, we want to request 30. 32 % 9
                 // (Red+IR+GREEN) = 5 left over. We want to request 27.
 
-                toGet = 64 - (64 % (proc_sensor_active_leds *
+                toGet = 64 - (64 % (prox_sensor_active_leds *
                                     3));  // Trim toGet to be a multiple of
                                           // the samples we need to read
             }
@@ -1102,7 +1117,6 @@ static uint16_t prox_sensor_update_impl(void) {
                 temp[2] = burst[0];
                 temp[1] = burst[1];
                 temp[0] = burst[2];
-
                 // Convert array to long
                 memcpy(&tempLong, temp, sizeof(tempLong));
 
@@ -1111,14 +1125,13 @@ static uint16_t prox_sensor_update_impl(void) {
                 prox_sensor_data.red[prox_sensor_data.head] =
                     tempLong;  // Store this reading into the sense array
 
-                if (proc_sensor_active_leds > 1) {
+                if (prox_sensor_active_leds>1) {
                     // Burst read three more bytes - IR
                     prox_sensor_read(burst, 3);
                     temp[3] = 0;
                     temp[2] = burst[0];
                     temp[1] = burst[1];
                     temp[0] = burst[2];
-
                     // Convert array to long
                     memcpy(&tempLong, temp, sizeof(tempLong));
 
@@ -1127,14 +1140,13 @@ static uint16_t prox_sensor_update_impl(void) {
                     prox_sensor_data.IR[prox_sensor_data.head] = tempLong;
                 }
 
-                if (proc_sensor_active_leds > 2) {
+                if (prox_sensor_active_leds>2) {
                     // Burst read three more bytes - Green
                     prox_sensor_read(burst, 3);
                     temp[3] = 0;
                     temp[2] = burst[0];
                     temp[1] = burst[1];
                     temp[0] = burst[2];
-
                     // Convert array to long
                     memcpy(&tempLong, temp, sizeof(tempLong));
 
@@ -1143,7 +1155,7 @@ static uint16_t prox_sensor_update_impl(void) {
                     prox_sensor_data.green[prox_sensor_data.head] = tempLong;
                 }
 
-                toGet -= proc_sensor_active_leds * 3;
+                toGet -= prox_sensor_active_leds * 3;
             }
 
         }  // End while (bytesLeftToRead > 0)
@@ -1171,6 +1183,7 @@ void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
                            uint8_t adcRange) {
     
     //prox_sensor_soft_reset();
+    prox_sensor_active_leds = 0;
     // FIFO Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
     // The chip will average multiple samples of same type together if you wish
@@ -1183,14 +1196,13 @@ void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
 
     // Mode Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-    prox_sensor_led_mode(/*mode*/PROX_SENS_MODE_MULTILED);  // Watch all three LED channels
-    proc_sensor_active_leds =
-        3;  // Used to control how many bytes to read from FIFO buffer
+    prox_sensor_led_mode(mode);  // Watch all three LED channels
+    //prox_sensor_mode = mode;
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
     // Particle Sensing Configuration
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-    proc_sensor_adc_range(adcRange);  // 7.81pA per LSB
+    prox_sensor_adc_range(adcRange);  // 7.81pA per LSB
 
     prox_sensor_sample_rate(sampleRate);  // Take 50 samples per second
 
@@ -1217,14 +1229,14 @@ void prox_sensor_configure(uint8_t powerLevel, uint8_t sampleAverage,
     // Multi-LED Mode Configuration, Enable the reading of the three LEDs
     //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
     prox_sensor_enable_slot(1, PROX_SENS_SLOT_RED_LED);
-    //++proc_sensor_active_leds;
+    ++prox_sensor_active_leds;
     if (mode == PROX_SENS_MODE_REDIRONLY || mode == PROX_SENS_MODE_MULTILED) {
         prox_sensor_enable_slot(2, PROX_SENS_SLOT_IR_LED);
-        //++proc_sensor_active_leds;
+        ++prox_sensor_active_leds;
     }
     if (mode == PROX_SENS_MODE_MULTILED) {
         prox_sensor_enable_slot(3, PROX_SENS_SLOT_GREEN_LED);
-        //++proc_sensor_active_leds;
+        ++prox_sensor_active_leds;
     }
     // prox_sensor_enable_slot(1, SLOT_RED_PILOT);
     // prox_sensor_enable_slot(2, SLOT_IR_PILOT);
@@ -1300,4 +1312,163 @@ void prox_sensor_pulse_amp_threshold(int16_t red, int16_t ir, int16_t green, int
     if(thresh>=0&&thresh<=0xFF) {
         prox_sensor_write_reg(0x30,thresh);
     }
+}
+
+void prox_sensor_configure2(uint8_t powerLevel, uint8_t sampleAverage , uint8_t ledMode, int sampleRate , int pulseWidth , int adcRange) {
+    static const uint8_t MAX30105_SAMPLEAVG_MASK = (uint8_t)~0b11100000;
+    static const uint8_t MAX30105_SAMPLEAVG_1 = 0x00;
+    static const uint8_t MAX30105_SAMPLEAVG_2 = 0x20;
+    static const uint8_t MAX30105_SAMPLEAVG_4 = 0x40;
+    static const uint8_t MAX30105_SAMPLEAVG_8 = 0x60;
+    static const uint8_t MAX30105_SAMPLEAVG_16 = 0x80;
+    static const uint8_t MAX30105_SAMPLEAVG_32 = 0xA0;
+
+    static const uint8_t MAX30105_ADCRANGE_MASK = 0x9F;
+    static const uint8_t MAX30105_ADCRANGE_2048 = 0x00;
+    static const uint8_t MAX30105_ADCRANGE_4096 = 0x20;
+    static const uint8_t MAX30105_ADCRANGE_8192 = 0x40;
+    static const uint8_t MAX30105_ADCRANGE_16384 = 0x60;
+
+    static const uint8_t MAX30105_SAMPLERATE_MASK = 0xE3;
+    static const uint8_t MAX30105_SAMPLERATE_50 = 0x00;
+    static const uint8_t MAX30105_SAMPLERATE_100 = 0x04;
+    static const uint8_t MAX30105_SAMPLERATE_200 = 0x08;
+    static const uint8_t MAX30105_SAMPLERATE_400 = 0x0C;
+    static const uint8_t MAX30105_SAMPLERATE_800 = 0x10;
+    static const uint8_t MAX30105_SAMPLERATE_1000 = 0x14;
+    static const uint8_t MAX30105_SAMPLERATE_1600 = 0x18;
+    static const uint8_t MAX30105_SAMPLERATE_3200 = 0x1C;
+
+    static const uint8_t MAX30105_PULSEWIDTH_MASK = 0xFC;
+    static const uint8_t MAX30105_PULSEWIDTH_69 = 0x00;
+    static const uint8_t MAX30105_PULSEWIDTH_118 = 0x01;
+    static const uint8_t MAX30105_PULSEWIDTH_215 = 0x02;
+    static const uint8_t MAX30105_PULSEWIDTH_411 = 0x03;
+
+    // Multi-LED Mode configuration (pg 22)
+    static const uint8_t MAX30105_SLOT1_MASK = 0xF8;
+    static const uint8_t MAX30105_SLOT2_MASK = 0x8F;
+    static const uint8_t MAX30105_SLOT3_MASK = 0xF8;
+    static const uint8_t MAX30105_SLOT4_MASK = 0x8F;
+
+    static const uint8_t SLOT_NONE = 0x00;
+    static const uint8_t SLOT_RED_LED = 0x01;
+    static const uint8_t SLOT_IR_LED = 0x02;
+    static const uint8_t SLOT_GREEN_LED = 0x03;
+    static const uint8_t SLOT_NONE_PILOT = 0x04;
+    static const uint8_t SLOT_RED_PILOT = 0x05;
+    static const uint8_t SLOT_IR_PILOT = 0x06;
+    static const uint8_t SLOT_GREEN_PILOT = 0x07;
+    static const uint8_t MAX30105_MODE_REDONLY = 	0x02;
+    static const uint8_t MAX30105_MODE_REDIRONLY = 	0x03;
+    static const uint8_t MAX30105_MODE_MULTILED = 	0x07;
+
+    // FIFO Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    // The chip will average multiple samples of same type together if you wish
+    if (sampleAverage == 1)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_1);  // No averaging per FIFO record
+    else if (sampleAverage == 2)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_2);
+    else if (sampleAverage == 4)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_4);
+    else if (sampleAverage == 8)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_8);
+    else if (sampleAverage == 16)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_16);
+    else if (sampleAverage == 32)
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_32);
+    else
+        prox_sensor_fifo_average(MAX30105_SAMPLEAVG_4);
+
+    // setFIFOAlmostFull(2); //Set to 30 samples to trigger an 'Almost Full'
+    // interrupt
+    prox_sensor_fifo_rollover_enable();  // Allow FIFO to wrap/roll over
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Mode Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    if (ledMode == 3)
+        prox_sensor_led_mode(MAX30105_MODE_MULTILED);  // Watch all three LED channels
+    else if (ledMode == 2)
+        prox_sensor_led_mode(MAX30105_MODE_REDIRONLY);  // Red and IR
+    else
+        prox_sensor_led_mode(MAX30105_MODE_REDONLY);  // Red only
+    prox_sensor_active_leds =
+        ledMode;  // Used to control how many bytes to read from FIFO buffer
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Particle Sensing Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    if (adcRange < 4096)
+        prox_sensor_adc_range(MAX30105_ADCRANGE_2048);  // 7.81pA per LSB
+    else if (adcRange < 8192)
+        prox_sensor_adc_range(MAX30105_ADCRANGE_4096);  // 15.63pA per LSB
+    else if (adcRange < 16384)
+        prox_sensor_adc_range(MAX30105_ADCRANGE_8192);  // 31.25pA per LSB
+    else if (adcRange == 16384)
+        prox_sensor_adc_range(MAX30105_ADCRANGE_16384);  // 62.5pA per LSB
+    else
+        prox_sensor_adc_range(MAX30105_ADCRANGE_2048);
+
+    if (sampleRate < 100)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_50);  // Take 50 samples per second
+    else if (sampleRate < 200)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_100);
+    else if (sampleRate < 400)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_200);
+    else if (sampleRate < 800)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_400);
+    else if (sampleRate < 1000)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_800);
+    else if (sampleRate < 1600)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_1000);
+    else if (sampleRate < 3200)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_1600);
+    else if (sampleRate == 3200)
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_3200);
+    else
+        prox_sensor_sample_rate(MAX30105_SAMPLERATE_50);
+
+    // The longer the pulse width the longer range of detection you'll have
+    // At 69us and 0.4mA it's about 2 inches
+    // At 411us and 0.4mA it's about 6 inches
+    if (pulseWidth < 118)
+        prox_sensor_pulse_width(
+            MAX30105_PULSEWIDTH_69);  // Page 26, Gets us 15 bit resolution
+    else if (pulseWidth < 215)
+        prox_sensor_pulse_width(MAX30105_PULSEWIDTH_118);  // 16 bit resolution
+    else if (pulseWidth < 411)
+        prox_sensor_pulse_width(MAX30105_PULSEWIDTH_215);  // 17 bit resolution
+    else if (pulseWidth == 411)
+        prox_sensor_pulse_width(MAX30105_PULSEWIDTH_411);  // 18 bit resolution
+    else
+        prox_sensor_pulse_width(MAX30105_PULSEWIDTH_69);
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // LED Pulse Amplitude Configuration
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    // Default is 0x1F which gets us 6.4mA
+    // powerLevel = 0x02, 0.4mA - Presence detection of ~4 inch
+    // powerLevel = 0x1F, 6.4mA - Presence detection of ~8 inch
+    // powerLevel = 0x7F, 25.4mA - Presence detection of ~8 inch
+    // powerLevel = 0xFF, 50.0mA - Presence detection of ~12 inch
+
+    prox_sensor_pulse_amp_red(powerLevel);
+    prox_sensor_pulse_amp_ir(powerLevel);
+    prox_sensor_pulse_amp_green(powerLevel);
+    prox_sensor_pulse_amp_prox(powerLevel);
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    // Multi-LED Mode Configuration, Enable the reading of the three LEDs
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+    prox_sensor_enable_slot(1, SLOT_RED_LED);
+    if (ledMode > 1) prox_sensor_enable_slot(2, SLOT_IR_LED);
+    if (ledMode > 2) prox_sensor_enable_slot(3, SLOT_GREEN_LED);
+    // prox_sensor_enable_slot(1, SLOT_RED_PILOT);
+    // prox_sensor_enable_slot(2, SLOT_IR_PILOT);
+    // prox_sensor_enable_slot(3, SLOT_GREEN_PILOT);
+    //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+    prox_sensor_clear_fifo();  // Reset the FIFO before we begin checking the sensor
 }

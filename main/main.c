@@ -46,7 +46,7 @@ static void lcd_clear_screen(uint16_t color) {
 static SemaphoreHandle_t audio_sync=NULL;
 static float audio_freq = 1000;
 static long samplesTaken = 0; //Counter for calculating the Hz or read rate
-static long unblockedValue; //Average IR at power up
+static uint32_t prox_average; //Average IR at power up
 static long startTime; //Used to calculate measurement rate
 
 
@@ -139,19 +139,33 @@ void app_main(void)
 
     //Setup to sense up to 18 inches, max LED brightness
     prox_sensor_initialize();
-    prox_sensor_configure(PROX_SENS_AMP_DEFAULT,PROX_SENS_SAMPLEAVG_DEFAULT,PROX_SENS_MODE_DEFAULT,PROX_SENS_SAMPLERATE_DEFAULT,PROX_SENS_PULSEWIDTH_DEFAULT, PROX_SENS_ADCRANGE_DEFAULT);
-    //prox_sensor_pulse_amp_threshold(0,PROX_SENS_THRESH_NO_CHANGE,0,PROX_SENS_THRESH_NO_CHANGE,PROX_SENS_THRESH_NO_CHANGE);
-     //Take an average of IR readings at power up
-    unblockedValue = 0;
-    for (uint8_t x = 0 ; x < 32 ; ++x)
-    {
-        uint8_t ir;
-        if(0==prox_sensor_read_raw(NULL,&ir,NULL,250)) {
-            puts("TIMEOUT");
+    prox_sensor_configure(PROX_SENS_AMP_50MA,PROX_SENS_SAMPLEAVG_4,PROX_SENS_MODE_REDIRONLY,PROX_SENS_SAMPLERATE_400,PROX_SENS_PULSEWIDTH_411, PROX_SENS_ADCRANGE_2048);
+    
+    //Take an average of IR readings at power up
+    prox_average = 0;
+    int avg_div = 0;
+    for(int j = 0;j<10;++j) {
+        for (uint8_t x = 0 ; x < 32 ; ++x)
+        {
+            uint32_t ir;
+            if(0==prox_sensor_read_raw(NULL,&ir,NULL,250)) {
+                puts("TIMEOUT");
+            } else {
+                //printf("Val %d\n",(int)ir);
+                prox_average += ir;
+                ++avg_div;
+            }
+            
         }
-        unblockedValue += ir;
+        if(avg_div>=32) {
+            break;
+        }
     }
-    unblockedValue /= 32;
+    if(avg_div == 0 ){
+        puts("Retry count for prox sensor exceeded");
+        ESP_ERROR_CHECK(ESP_ERR_INVALID_RESPONSE);
+    }
+    prox_average /= avg_div;
 
     startTime = pdTICKS_TO_MS(xTaskGetTickCount());
     audio_sync = xSemaphoreCreateMutex();
@@ -171,13 +185,13 @@ void app_main(void)
         }
         uint32_t ir;
         prox_sensor_read_raw(NULL,&ir,NULL,250);
-    
-        long currentDelta = ir - unblockedValue;
+        long currentDelta = ir - prox_average;
         if(currentDelta>500) {
             currentDelta=500;
         } else if(currentDelta<0) {
             currentDelta = 0;
         }
+        
         xSemaphoreTake(audio_sync,50);
         audio_freq = 1000-currentDelta;
         xSemaphoreGive(audio_sync);
