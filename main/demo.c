@@ -1,3 +1,4 @@
+//#define SILENCE
 #include <stdio.h>
 #include <memory.h>
 #include <math.h>
@@ -68,17 +69,20 @@ void audio_task(void* arg) {
 			}
             tml_message_cursor = tml_message_cursor->next;
         }
-        float amp;
-        xSemaphoreTake(audio_sync,portMAX_DELAY);
-        amp = audio_amplitude;
-        xSemaphoreGive(audio_sync);
-
-        tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES>>1, 0);
-        audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,amp);
         if(tml_message_cursor==NULL) {
             start_ms = pdTICKS_TO_MS(xTaskGetTickCount());
             tml_message_cursor = tml_messages;
         }
+#ifndef SILENCE
+        float amp;
+        xSemaphoreTake(audio_sync,portMAX_DELAY);
+        amp = audio_amplitude;
+        xSemaphoreGive(audio_sync);
+        
+        tsf_render_float(tsf_handle, (float*)audio_output_buffer,AUDIO_MAX_SAMPLES>>1, 0);
+        audio_write_float(audio_output_buffer,AUDIO_MAX_SAMPLES,amp);
+#endif
+        
     }
 
 }
